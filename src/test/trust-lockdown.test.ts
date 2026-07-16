@@ -35,10 +35,10 @@ describe("verdict-cache regression", () => {
 
   it("cannot copy another user's details into a new submission", () => {
     const source = projectFile("supabase/functions/analyze-funko/index.ts");
-    const completionBlock = source.slice(source.indexOf('.from("authentications")\n      .update'));
+    const completionBlock = source.slice(source.indexOf('.from("assessment_runs")'));
 
-    expect(completionBlock).toContain("details: {");
-    expect(completionBlock).toContain("summary: analysis.summary");
+    expect(completionBlock).toContain("structured_observations: assessment.observations");
+    expect(completionBlock).toContain("verdict: assessment.decision");
     expect(completionBlock).not.toMatch(/details:\s*(cached|ownedRow|previous)/);
     expect(completionBlock).not.toContain("cached_from_id: cached");
   });
@@ -87,7 +87,7 @@ describe("reference provenance regression", () => {
     expect(source.toLowerCase()).not.toContain("duckduckgo");
     expect(source.toLowerCase()).not.toContain("gold standard");
     expect(source.toLowerCase()).not.toContain("gold-standard");
-    expect(source).toContain("LEGACY / UNVERIFIED");
+    expect(source.toLowerCase()).toContain("legacy, unverified");
   });
 });
 

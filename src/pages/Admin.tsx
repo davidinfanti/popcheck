@@ -22,18 +22,19 @@ import { format } from "date-fns";
 import { enUS } from "date-fns/locale";
 import { cn } from "@/lib/utils";
 
-type ScanStatusFilter = "all" | "original" | "uncertain" | "fake";
+type ScanStatusFilter = "all" | "completed" | "pending" | "attention";
 const SCAN_STATUS_TABS: { key: ScanStatusFilter; label: string; icon: any; color: string }[] = [
   { key: "all", label: "All", icon: BarChart3, color: "text-foreground" },
-  { key: "original", label: "Original", icon: ShieldCheck, color: "text-success" },
-  { key: "uncertain", label: "Uncertain", icon: ShieldAlert, color: "text-warning" },
-  { key: "fake", label: "Fake", icon: ShieldX, color: "text-destructive" },
+  { key: "completed", label: "Completed", icon: ShieldCheck, color: "text-success" },
+  { key: "pending", label: "In progress", icon: ScanLine, color: "text-primary" },
+  { key: "attention", label: "Needs attention", icon: ShieldAlert, color: "text-warning" },
 ];
 const classifyScan = (score: number | null | undefined, status: string): ScanStatusFilter => {
-  if (status === "analyzing" || status === "pending" || score == null) return "all";
-  if (score >= 80) return "original";
-  if (score >= 50) return "uncertain";
-  return "fake";
+  void score;
+  if (status === "completed") return "completed";
+  if (status === "analyzing" || status === "pending") return "pending";
+  if (status === "failed" || status === "evidence_required") return "attention";
+  return "all";
 };
 function AdminStatCard({ label, value, icon: Icon, tone }: { label: string; value: number | string; icon: any; tone: string }) {
   return (
@@ -103,6 +104,12 @@ interface UserWithScans {
   scan_count: number;
 }
 
+interface GuidanceMetadata {
+  createdAt: string;
+  createdBy: string;
+  previousVersionId: string | null;
+}
+
 type Tab = "feed" | "flagged" | "rules" | "references" | "users" | "settings";
 
 const PART_TYPES = ["Front", "Back", "Bottom", "Logo_Detail", "Left_Side", "Right_Side", "Sticker", "Macro", "Other"];
@@ -143,6 +150,9 @@ export default function Admin() {
   const [loadingUsers, setLoadingUsers] = useState(true);
 
   const [systemInstructions, setSystemInstructions] = useState("");
+  const [guidanceCategory, setGuidanceCategory] = useState("evidence_quality");
+  const [guidanceVersion, setGuidanceVersion] = useState<number | null>(null);
+  const [guidanceMetadata, setGuidanceMetadata] = useState<GuidanceMetadata | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
 
   useEffect(() => {
@@ -217,19 +227,37 @@ export default function Admin() {
 
   useEffect(() => {
     if (!isAdmin) return;
-    supabase.from("ai_settings").select("*").eq("key", "system_instructions_override").single()
-      .then(({ data }) => { if (data) setSystemInstructions((data as any).value || ""); });
+    supabase.from("ai_guidance_versions").select("*").order("version", { ascending: false }).limit(1).maybeSingle()
+      .then(({ data }) => {
+        if (!data) return;
+        setSystemInstructions(data.guidance);
+        setGuidanceCategory(data.category);
+        setGuidanceVersion(data.version);
+        setGuidanceMetadata({
+          createdAt: data.created_at,
+          createdBy: data.created_by,
+          previousVersionId: data.previous_version_id,
+        });
+      });
   }, [isAdmin]);
 
   const saveSettings = async () => {
     setSavingSettings(true);
-    const { error } = await supabase
-      .from("ai_settings")
-      .update({ value: systemInstructions, updated_at: new Date().toISOString(), updated_by: user!.id })
-      .eq("key", "system_instructions_override");
+    const { data, error } = await supabase.rpc("create_ai_guidance_version", {
+      p_category: guidanceCategory,
+      p_guidance: systemInstructions,
+    });
     setSavingSettings(false);
-    if (error) { toast.error("Error saving settings"); return; }
-    toast.success("System Instructions updated");
+    if (error) { toast.error(error.message || "Guidance was rejected"); return; }
+    if (data) {
+      setGuidanceVersion(data.version);
+      setGuidanceMetadata({
+        createdAt: data.created_at,
+        createdBy: data.created_by,
+        previousVersionId: data.previous_version_id,
+      });
+    }
+    toast.success(`Observation guidance version ${data?.version ?? "created"} created`);
   };
 
   const validateFlag = async (flag: FlaggedItem, approved: boolean) => {
@@ -350,8 +378,7 @@ export default function Admin() {
     );
   }
 
-  const scoreColor = (s: number | null) =>
-    s === null ? "text-muted-foreground" : s >= 80 ? "text-success" : s >= 50 ? "text-warning" : "text-destructive";
+  const scoreColor = (s: number | null) => s === null ? "text-muted-foreground" : "text-warning";
 
   // Filter references by pop_number
   const filterVal = refFilter.replace("#", "").toLowerCase();
@@ -395,18 +422,17 @@ export default function Admin() {
             </h2>
             {/* Stats */}
             {scans.length > 0 && (() => {
-              const scored = scans.filter((s) => typeof s.score === "number");
-              const original = scored.filter((s) => (s.score as number) >= 80).length;
-              const uncertain = scored.filter((s) => (s.score as number) >= 50 && (s.score as number) < 80).length;
-              const fake = scored.filter((s) => (s.score as number) < 50).length;
-              const avg = scored.length ? Math.round(scored.reduce((a, s) => a + (s.score as number), 0) / scored.length) : 0;
+              const completed = scans.filter((s) => s.status === "completed").length;
+              const inProgress = scans.filter((s) => s.status === "pending" || s.status === "analyzing").length;
+              const attention = scans.filter((s) => s.status === "failed" || s.status === "evidence_required").length;
+              const legacy = scans.filter((s) => typeof s.score === "number").length;
               return (
                 <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-4">
                   <AdminStatCard label="Total" value={scans.length} icon={BarChart3} tone="text-foreground" />
-                  <AdminStatCard label="Original" value={original} icon={ShieldCheck} tone="text-success" />
-                  <AdminStatCard label="Uncertain" value={uncertain} icon={ShieldAlert} tone="text-warning" />
-                  <AdminStatCard label="Fake" value={fake} icon={ShieldX} tone="text-destructive" />
-                  <AdminStatCard label="Avg V-STAMP" value={avg ? `${avg}/100` : "—"} icon={ScanLine} tone="text-primary" />
+                  <AdminStatCard label="Completed" value={completed} icon={ShieldCheck} tone="text-success" />
+                  <AdminStatCard label="In progress" value={inProgress} icon={ScanLine} tone="text-primary" />
+                  <AdminStatCard label="Needs attention" value={attention} icon={ShieldAlert} tone="text-warning" />
+                  <AdminStatCard label="Legacy score rows" value={legacy} icon={AlertTriangle} tone="text-warning" />
                 </div>
               );
             })()}
@@ -478,13 +504,13 @@ export default function Admin() {
                     <PopoverTrigger asChild>
                       <Button variant="outline" size="sm" className={cn("text-xs gap-1.5", (scanScoreRange[0] > 0 || scanScoreRange[1] < 100) && "border-primary text-primary")}>
                         <BarChart3 className="w-3 h-3" />
-                        Score {scanScoreRange[0]}-{scanScoreRange[1]}
+                        Legacy score {scanScoreRange[0]}-{scanScoreRange[1]}
                       </Button>
                     </PopoverTrigger>
                     <PopoverContent className="w-64 p-4" align="start">
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-mono text-muted-foreground">V-STAMP range</span>
+                          <span className="text-xs font-mono text-muted-foreground">Uncalibrated legacy V-STAMP range</span>
                           <span className="text-xs font-mono font-bold text-primary">{scanScoreRange[0]} – {scanScoreRange[1]}</span>
                         </div>
                         <Slider value={scanScoreRange} onValueChange={(v) => setScanScoreRange([v[0], v[1]] as [number, number])} min={0} max={100} step={5} />
@@ -533,7 +559,7 @@ export default function Admin() {
                         <p className="text-[11px] text-muted-foreground font-mono">{new Date(scan.created_at).toLocaleString("en-US")}</p>
                       </div>
                       <Badge variant="outline" className={`font-mono text-xs ${scoreColor(scan.score)}`}>
-                        {scan.status === "completed" ? `${scan.score}/100` : scan.status}
+                        {scan.status === "completed" && scan.score != null ? `Legacy ${scan.score}/100 (uncalibrated)` : scan.status}
                       </Badge>
                     </CardContent>
                   </Card>
@@ -610,10 +636,12 @@ export default function Admin() {
                   </div>
                 )}
                 <div>
-                  <p className="text-xs font-mono text-muted-foreground mb-1 uppercase tracking-wider">Original AI verdict</p>
+                  <p className="text-xs font-mono text-muted-foreground mb-1 uppercase tracking-wider">Historical legacy data</p>
                   <div className="flex items-center gap-3 bg-secondary/30 p-3 rounded-lg border border-border/30">
-                    <span className={`font-mono text-2xl font-black ${scoreColor(selectedFlag.report?.score ?? null)}`}>{selectedFlag.report?.score ?? "—"}</span>
-                    <span className="text-sm text-muted-foreground">/100</span>
+                    <span className={`font-mono text-xl font-black ${scoreColor(selectedFlag.report?.score ?? null)}`}>
+                      {selectedFlag.report?.score != null ? `Legacy V-STAMP ${selectedFlag.report.score}/100` : "No legacy score"}
+                    </span>
+                    <span className="text-xs text-muted-foreground">Uncalibrated; not a probability</span>
                   </div>
                 </div>
                 <div>
@@ -643,6 +671,9 @@ export default function Admin() {
             <h2 className="font-display text-xl font-bold flex items-center gap-2">
               <BookOpen className="w-5 h-5 text-primary" /> Expert Rules (Forensic Manual)
             </h2>
+            <div className="rounded-lg border border-warning/40 bg-warning/5 px-4 py-3 text-xs text-muted-foreground">
+              This is a legacy reference manual. Phase 1B does not feed these mutable rows into the model or decision engine. Use Versioned observation guidance for constrained instructions that can influence a run.
+            </div>
             <Card className="border-primary/20">
               <CardHeader><CardTitle className="text-sm font-mono">Add new rule</CardTitle></CardHeader>
               <CardContent className="space-y-3">
@@ -969,19 +1000,33 @@ export default function Admin() {
         {tab === "settings" && (
           <div className="space-y-6">
             <h2 className="font-display text-xl font-bold flex items-center gap-2">
-              <Settings className="w-5 h-5 text-primary" /> Global AI Settings
+              <Settings className="w-5 h-5 text-primary" /> Versioned observation guidance
             </h2>
             <Card className="border-border/50">
               <CardHeader>
-                <CardTitle className="text-sm font-mono">System Instructions Override</CardTitle>
-                <p className="text-xs text-muted-foreground">Instructions entered here are appended to the Gemini system prompt for every analysis.</p>
+                <CardTitle className="text-sm font-mono">Constrained forensic guidance {guidanceVersion ? `(current version ${guidanceVersion})` : ""}</CardTitle>
+                <p className="text-xs text-muted-foreground">Guidance can refine visible observation checks only. It cannot change the output schema, decision engine, verdict classes, uncertainty handling, or restore numerical scoring. Every save appends a new immutable version with editor and timestamp.</p>
+                {guidanceMetadata && (
+                  <p className="text-[11px] font-mono text-muted-foreground">
+                    Created {new Date(guidanceMetadata.createdAt).toLocaleString()} by {guidanceMetadata.createdBy.slice(0, 8)}... | Previous version: {guidanceMetadata.previousVersionId ? guidanceMetadata.previousVersionId.slice(0, 8) : "none"}
+                  </p>
+                )}
               </CardHeader>
               <CardContent className="space-y-4">
+                <Select value={guidanceCategory} onValueChange={setGuidanceCategory}>
+                  <SelectTrigger><SelectValue placeholder="Observation category" /></SelectTrigger>
+                  <SelectContent>
+                    {[
+                      "evidence_quality", "identity", "reference", "packaging", "typography",
+                      "code", "figure", "sticker", "listing",
+                    ].map((category) => <SelectItem key={category} value={category}>{category.replaceAll("_", " ")}</SelectItem>)}
+                  </SelectContent>
+                </Select>
                 <Textarea value={systemInstructions} onChange={(e) => setSystemInstructions(e.target.value)}
-                  placeholder="E.g.: Be stricter on white borders for post-2022 Pops." rows={10} className="font-mono text-xs bg-secondary/20" />
+                  placeholder="Describe a factual, visible element to inspect and how to report uncertainty." rows={8} className="font-mono text-xs bg-secondary/20" />
                 <Button onClick={saveSettings} disabled={savingSettings}>
                   {savingSettings ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Settings className="w-4 h-4 mr-2" />}
-                  Save Instructions
+                  Append guidance version
                 </Button>
               </CardContent>
             </Card>

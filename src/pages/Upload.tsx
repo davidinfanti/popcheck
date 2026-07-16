@@ -19,14 +19,14 @@ const SLOTS = [
 ] as const;
 
 const FORENSIC_PHASES = [
-  "Phase 0 · OCR identification of Name, Number, Line...",
-  "Phase 1 · Market & metadata audit (PPG, origin flags)...",
-  "Phase 2 · Macro-box forensics (white border, cardboard)...",
-  "Phase 3 · Micro-print & typography (halftone, kerning)...",
-  "Phase 4 · Vinyl figure audit (stamp match, paint job)...",
-  "Phase 5 · Sticker & QR special features...",
-  "Cross-referencing Lynnwood Protocol & reference library...",
-  "Compiling V-STAMP verdict band...",
+  "Checking evidence quality and visible regions...",
+  "Reading visible identity fields without inference...",
+  "Recording packaging and typography observations...",
+  "Recording visible code and figure observations...",
+  "Disclosing unavailable and uncertain evidence...",
+  "Comparing against available references by reliability...",
+  "Validating the structured observation contract...",
+  "Applying the deterministic decision engine...",
 ];
 
 export default function UploadPage() {
@@ -171,7 +171,7 @@ export default function UploadPage() {
             <ScanLine className="absolute inset-0 m-auto w-8 h-8 text-primary" />
           </div>
           <div>
-            <h2 className="font-display text-xl font-bold text-foreground mb-2">V-STAMP Analysis in progress...</h2>
+            <h2 className="font-display text-xl font-bold text-foreground mb-2">AI-assisted assessment in progress...</h2>
             <p className="text-sm text-muted-foreground">
               Uploading and running forensic analysis on {completedCount} photos. This takes a few seconds.
             </p>
@@ -237,7 +237,7 @@ export default function UploadPage() {
           >
             <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
             <p className="text-xs text-foreground">
-              Partial analysis ({completedCount}/6 photos). Upload more angles for 100% accuracy.
+              Limited evidence ({completedCount}/6 photos). Additional angles may improve assessability; missing evidence will not be treated as proof either way.
             </p>
           </motion.div>
         )}

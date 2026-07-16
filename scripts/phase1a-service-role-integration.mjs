@@ -20,7 +20,7 @@ async function signUp(label) {
     method: "POST",
     headers: { apikey: anonKey, "Content-Type": "application/json" },
     body: JSON.stringify({
-      email: `phase1a-${label}-${Date.now()}@example.test`,
+      email: `phase1b-${label}-${Date.now()}@example.test`,
       password: "Local-integration-only-42!",
     }),
   }));
@@ -75,6 +75,21 @@ async function serviceRead(authenticationId) {
   return data[0];
 }
 
+async function serviceReadRuns(authenticationId) {
+  const { response, data } = await jsonResponse(await fetch(
+    `${apiUrl}/rest/v1/assessment_runs?authentication_id=eq.${authenticationId}&select=*&order=created_at.asc`,
+    {
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+      },
+    },
+  ));
+
+  assert.equal(response.status, 200, `service-role run read failed with ${response.status}`);
+  return data;
+}
+
 const initialStubStatus = await jsonResponse(await fetch(stubUrl));
 assert.equal(initialStubStatus.response.status, 200, "AI stub status endpoint is unavailable");
 const initialAnalysisCalls = initialStubStatus.data.analysisCalls;
@@ -102,14 +117,51 @@ assert.equal(completed.data.success, true);
 
 const completedRow = await serviceRead(submission.id);
 assert.equal(completedRow.status, "completed");
-assert.equal(completedRow.score, 88);
-assert.equal(completedRow.details.summary, "Stubbed Phase 1A service-role integration analysis.");
+assert.equal(completedRow.score, null, "Phase 1B must not populate the legacy score");
+assert.equal(completedRow.details.phase1b, true);
+assert.equal(completedRow.details.decision.verdictClass, "no_material_anomaly_detected");
 assert.equal(completedRow.analysis_model, "google/gemini-3-flash-preview");
-assert.equal(completedRow.analysis_config_version, "vstamp-5.0-phase-1a");
+assert.equal(completedRow.analysis_config_version, "popcheck-observation-v1");
 assert.equal(completedRow.analysis_source, "physical_scan");
 assert.equal(completedRow.legacy_unverified_references_used, false);
 assert(completedRow.analyzed_at);
 assert.equal(completedRow.details.audit.analysisSource, "physical_scan");
+assert.equal(completedRow.details.audit.decisionEngineVersion, "popcheck-decision-v1");
+
+const firstRuns = await serviceReadRuns(submission.id);
+assert.equal(firstRuns.length, 1);
+assert.equal(firstRuns[0].id, completed.data.assessmentRunId);
+assert.equal(firstRuns[0].run_kind, "phase_1b");
+assert.equal(firstRuns[0].prompt_version, "popcheck-observation-v1");
+assert.equal(firstRuns[0].decision_engine_version, "popcheck-decision-v1");
+assert.equal(firstRuns[0].verdict.verdictClass, "no_material_anomaly_detected");
+assert.equal(firstRuns[0].dimensions.referenceCoverage, "none");
+assert.equal(firstRuns[0].structured_observations.length, 3);
+
+const repeated = await invoke(owner, submission.id);
+assert.equal(repeated.response.status, 200);
+const repeatedRuns = await serviceReadRuns(submission.id);
+assert.equal(repeatedRuns.length, 2, "re-analysis must append a second run");
+assert.equal(repeatedRuns[0].id, firstRuns[0].id, "the earlier run must remain unchanged");
+assert.notEqual(repeatedRuns[1].id, repeatedRuns[0].id);
+
+async function assertControlledProviderFailure(marker, expectedCode) {
+  const failureSubmission = await insertSubmission(owner, [
+    `${canonicalSupabaseUrl}/storage/v1/object/public/funko-images/${owner.userId}/${marker}.jpg`,
+  ]);
+  const failureResult = await invoke(owner, failureSubmission.id);
+  assert.equal(failureResult.response.status, 422, `${marker} must return a controlled 422`);
+  assert.equal(failureResult.data.error, expectedCode);
+  const failureRow = await serviceRead(failureSubmission.id);
+  assert.equal(failureRow.status, "failed");
+  assert.equal(failureRow.details.failure.type, "phase_1b_analysis");
+  assert.equal(failureRow.details.failure.code, expectedCode);
+  assert.equal((await serviceReadRuns(failureSubmission.id)).length, 0, `${marker} must not create a verdict run`);
+}
+
+await assertControlledProviderFailure("stub-refusal", "MODEL_REFUSAL");
+await assertControlledProviderFailure("stub-incomplete", "INCOMPLETE_MODEL_OUTPUT");
+await assertControlledProviderFailure("stub-malformed", "MALFORMED_MODEL_OUTPUT");
 
 const rejectedSubmission = await insertSubmission(owner, ["https://attacker.example/private.jpg"]);
 const rejected = await invoke(owner, rejectedSubmission.id);
@@ -126,8 +178,8 @@ const stubStatus = await jsonResponse(await fetch(stubUrl));
 assert.equal(stubStatus.response.status, 200);
 assert.equal(
   stubStatus.data.analysisCalls,
-  initialAnalysisCalls + 1,
-  "only the valid owned submission may call the AI stub",
+  initialAnalysisCalls + 5,
+  "only the two completed runs and three controlled provider-failure fixtures may call the AI stub",
 );
 
 console.log(JSON.stringify({
@@ -138,6 +190,12 @@ console.log(JSON.stringify({
   requestBodyImageMismatchIgnored: true,
   serviceRoleCompletedAssessment: true,
   auditMetadataStored: true,
+  legacyScoreNotWritten: true,
+  appendOnlyHistoryPreserved: true,
+  deterministicVerdictStored: true,
   failedEvidencePersisted: true,
+  refusalFailedSafely: true,
+  incompleteOutputFailedSafely: true,
+  malformedOutputFailedSafely: true,
   paidAiCalls: 0,
 }, null, 2));

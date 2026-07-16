@@ -13,22 +13,22 @@ const steps = [
   },
   {
     icon: Eye,
-    title: "V-STAMP Analysis",
-    desc: "Our forensic AI examines typography, borders, serials, mold details & packaging era",
+    title: "AI-assisted observations",
+    desc: "The model records visible typography, borders, serials, mold details, and evidence limitations",
     num: "02",
   },
   {
     icon: Fingerprint,
-    title: "Forensic Report",
-    desc: "Detailed investigative notes with side-by-side reference comparison",
+    title: "Assessment Report",
+    desc: "A deterministic categorical verdict with observations, limitations, and reference reliability",
     num: "03",
   },
 ];
 
 const stats = [
   { value: "6", label: "Photo Angles" },
-  { value: "V-STAMP", label: "Protocol" },
-  { value: "40%", label: "Typography Weight" },
+  { value: "7", label: "Result Dimensions" },
+  { value: "v1", label: "Decision Engine" },
   { value: "<30s", label: "Analysis Time" },
 ];
 
@@ -77,17 +77,17 @@ export default function Landing() {
         >
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-primary/30 bg-primary/5 text-primary text-sm font-mono mb-8">
             <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-            V-STAMP FORENSIC PROTOCOL
+            AI-ASSISTED EVIDENCE ASSESSMENT
           </div>
 
           <h1 className="font-display text-5xl md:text-7xl font-black leading-[0.95] mb-6 tracking-tight">
-            Authenticate your
+            Assess your
             <br />
             <span className="text-primary">Funko Pop</span>
           </h1>
           <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed">
             Upload 6 forensic photos and let our AI analyze typography, packaging era, serial codes, and mold details.
-            Know before you buy or sell.
+            Review visible evidence and limitations before you buy or sell.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center gap-4">
@@ -156,22 +156,22 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* V-STAMP breakdown */}
+      {/* Evidence categories */}
       <section className="px-6 pb-24 max-w-5xl mx-auto">
         <div className="rounded-2xl border border-border/50 bg-card p-8 md:p-12">
           <span className="text-sm font-mono text-primary uppercase tracking-widest">Protocol</span>
           <h2 className="font-display text-2xl md:text-3xl font-black mt-3 mb-8 tracking-tight">
-            V-STAMP Forensic Checks
+            Visible Evidence Checks
           </h2>
 
           <div className="grid md:grid-cols-2 gap-4">
             {[
-              { letter: "V", name: "Vision", desc: "Print texture & halftone dot patterns", pct: "—" },
-              { letter: "S", name: "Serial", desc: "Production codes matched against release years", pct: "—" },
-              { letter: "T", name: "Typography", desc: "Font kerning & POP! logo analysis", pct: "40%" },
-              { letter: "A", name: "Art", desc: "White border offset relative to factory origin", pct: "30%" },
-              { letter: "M", name: "Mold", desc: "Figure sculpt, paint lines & finish quality", pct: "10%" },
-              { letter: "P", name: "Packaging", desc: "Box construction & era-correct social logos", pct: "20%" },
+              { letter: "V", name: "Vision", desc: "Print texture and halftone dot visibility" },
+              { letter: "S", name: "Serial", desc: "Visible production and barcode evidence" },
+              { letter: "T", name: "Typography", desc: "Font geometry and POP! logo observations" },
+              { letter: "A", name: "Art", desc: "Visible border and artwork alignment" },
+              { letter: "M", name: "Mold", desc: "Visible sculpt, paint lines, and finish details" },
+              { letter: "P", name: "Packaging", desc: "Box construction and visible era indicators" },
             ].map((item, i) => (
               <motion.div
                 key={item.letter}
@@ -185,7 +185,6 @@ export default function Landing() {
                   <p className="font-semibold text-sm">{item.name}</p>
                   <p className="text-xs text-muted-foreground">{item.desc}</p>
                 </div>
-                <span className="font-mono text-xs text-muted-foreground">{item.pct}</span>
               </motion.div>
             ))}
           </div>
@@ -198,7 +197,7 @@ export default function Landing() {
           <h2 className="font-display text-3xl md:text-4xl font-black mb-4 tracking-tight">
             Don't get <span className="text-destructive">burned</span>
           </h2>
-          <p className="text-muted-foreground mb-8">Protect your collection with forensic-grade authentication.</p>
+          <p className="text-muted-foreground mb-8">Review an AI-assisted assessment of the evidence you submit.</p>
           <Button
             size="lg"
             className="text-lg px-10 py-6 rounded-full font-bold"
@@ -211,7 +210,7 @@ export default function Landing() {
 
       {/* Footer */}
       <footer className="text-center py-8 text-xs text-muted-foreground border-t border-border/30 font-mono">
-        POPCHECK AI — V-STAMP FORENSIC AUTHENTICATION
+        POPCHECK AI - AI-ASSISTED ASSESSMENT
       </footer>
     </div>
   );

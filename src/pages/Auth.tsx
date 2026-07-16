@@ -65,7 +65,7 @@ export default function Auth() {
               {isLogin ? "Welcome back" : "Create account"}
             </CardTitle>
             <p className="text-sm text-muted-foreground mt-1">
-              {isLogin ? "Sign in to continue your forensic analysis" : "Start authenticating your Funko Pops"}
+              {isLogin ? "Sign in to continue your assessment" : "Start assessing your Funko Pop evidence"}
             </p>
           </CardHeader>
           <CardContent>

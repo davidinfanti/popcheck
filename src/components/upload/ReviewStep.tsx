@@ -73,9 +73,9 @@ export default function ReviewStep({
 
       <Button size="lg" className="w-full font-bold text-lg py-6 rounded-2xl animate-pulse-glow" disabled={!allUploaded || uploading} onClick={onSubmit}>
         {uploading ? (
-          <span className="flex items-center gap-2"><Loader2 className="w-5 h-5 animate-spin" /> Running V-STAMP Analysis...</span>
+          <span className="flex items-center gap-2"><Loader2 className="w-5 h-5 animate-spin" /> Recording structured observations...</span>
         ) : (
-          <span className="flex items-center gap-2"><ScanLine className="w-5 h-5" /> Start Forensic Analysis</span>
+          <span className="flex items-center gap-2"><ScanLine className="w-5 h-5" /> Start AI-assisted assessment</span>
         )}
       </Button>
 

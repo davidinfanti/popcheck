@@ -7,13 +7,71 @@ export type Json =
   | Json[]
 
 export type Database = {
-  // Allows to automatically instantiate createClient with right options
-  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
-  __InternalSupabase: {
-    PostgrestVersion: "14.1"
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
   }
   public: {
     Tables: {
+      ai_guidance_versions: {
+        Row: {
+          category: string
+          created_at: string
+          created_by: string
+          guidance: string
+          id: string
+          previous_version_id: string | null
+          version: number
+        }
+        Insert: {
+          category: string
+          created_at?: string
+          created_by: string
+          guidance: string
+          id?: string
+          previous_version_id?: string | null
+          version: number
+        }
+        Update: {
+          category?: string
+          created_at?: string
+          created_by?: string
+          guidance?: string
+          id?: string
+          previous_version_id?: string | null
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_guidance_versions_previous_version_id_fkey"
+            columns: ["previous_version_id"]
+            isOneToOne: false
+            referencedRelation: "ai_guidance_versions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       ai_settings: {
         Row: {
           id: string
@@ -37,6 +95,78 @@ export type Database = {
           value?: string
         }
         Relationships: []
+      }
+      assessment_runs: {
+        Row: {
+          authentication_id: string
+          candidate_identity: Json
+          created_at: string
+          decision_engine_version: string
+          dimensions: Json
+          guidance_version_id: string | null
+          id: string
+          limitations: Json
+          missing_evidence: Json
+          model: string
+          observation_schema_version: string
+          prompt_version: string
+          run_kind: string
+          source: string
+          structured_observations: Json
+          verdict: Json
+        }
+        Insert: {
+          authentication_id: string
+          candidate_identity: Json
+          created_at?: string
+          decision_engine_version: string
+          dimensions: Json
+          guidance_version_id?: string | null
+          id?: string
+          limitations?: Json
+          missing_evidence?: Json
+          model: string
+          observation_schema_version: string
+          prompt_version: string
+          run_kind?: string
+          source: string
+          structured_observations: Json
+          verdict: Json
+        }
+        Update: {
+          authentication_id?: string
+          candidate_identity?: Json
+          created_at?: string
+          decision_engine_version?: string
+          dimensions?: Json
+          guidance_version_id?: string | null
+          id?: string
+          limitations?: Json
+          missing_evidence?: Json
+          model?: string
+          observation_schema_version?: string
+          prompt_version?: string
+          run_kind?: string
+          source?: string
+          structured_observations?: Json
+          verdict?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "assessment_runs_authentication_id_fkey"
+            columns: ["authentication_id"]
+            isOneToOne: false
+            referencedRelation: "authentications"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "assessment_runs_guidance_version_id_fkey"
+            columns: ["guidance_version_id"]
+            isOneToOne: false
+            referencedRelation: "ai_guidance_versions"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       authentications: {
         Row: {
@@ -407,15 +537,65 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      create_ai_guidance_version: {
+        Args: { p_category: string; p_guidance: string }
+        Returns: {
+          category: string
+          created_at: string
+          created_by: string
+          guidance: string
+          id: string
+          previous_version_id: string | null
+          version: number
+        }
+        SetofOptions: {
+          from: "*"
+          to: "ai_guidance_versions"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      get_shared_assessment_runs: {
+        Args: { p_id: string; p_token: string }
+        Returns: {
+          authentication_id: string
+          candidate_identity: Json
+          created_at: string
+          decision_engine_version: string
+          dimensions: Json
+          guidance_version_id: string | null
+          id: string
+          limitations: Json
+          missing_evidence: Json
+          model: string
+          observation_schema_version: string
+          prompt_version: string
+          run_kind: string
+          source: string
+          structured_observations: Json
+          verdict: Json
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "assessment_runs"
+          isOneToOne: false
+          isSetofReturn: true
+        }
+      }
       get_shared_authentication: {
         Args: { p_id: string; p_token: string }
         Returns: {
+          analysis_config_version: string | null
+          analysis_model: string | null
+          analysis_source: string | null
+          analyzed_at: string | null
           cache_key: string | null
           cached_from_id: string | null
           created_at: string
           details: Json | null
           id: string
           image_urls: string[] | null
+          legacy_unverified_references_used: boolean | null
           pop_name: string | null
           pop_number: string | null
           score: number | null
@@ -566,6 +746,9 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {
       app_role: ["admin", "moderator", "user"],

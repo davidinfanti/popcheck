@@ -1,530 +1,453 @@
-import { useEffect, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
-import { useAuth } from "@/hooks/useAuth";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { motion } from "framer-motion";
+import {
+  AlertTriangle, ArrowLeft, Clock3, Download, Eye, FileText, Flag,
+  History, Home, Loader2, RefreshCw, ScanLine, ShieldAlert, ShieldCheck, ShieldQuestion,
+} from "lucide-react";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
-import { motion } from "framer-motion";
-import { toast } from "sonner";
-import { ArrowLeft, AlertTriangle, Home, ShieldAlert, ShieldCheck, ShieldQuestion, ScanLine, FileText, Eye, Flag, Download, RefreshCw, Loader2 } from "lucide-react";
 import ComparisonSlider from "@/components/results/ComparisonSlider";
-import { generateCertificatePDF } from "@/utils/generateCertificate";
-import { getAnalysisSourceDisclosure, getSourceAwareVerdict } from "@/lib/analysisSourceDisclosure";
+import { useAuth } from "@/hooks/useAuth";
+import { getAnalysisSourceDisclosure } from "@/lib/analysisSourceDisclosure";
+import type { CandidateIdentity, StructuredObservation } from "@/lib/assessment/contract";
+import type { AssessmentDimensions, DecisionResult, VerdictClass } from "@/lib/assessment/decisionEngine";
+import { supabase } from "@/integrations/supabase/client";
+import type { Tables } from "@/integrations/supabase/types";
+import { generateAssessmentReportPDF } from "@/utils/generateAssessmentReport";
 
-interface CategoryScores {
-  typography: number;
-  border: number;
-  barcode: number;
-  color: number;
+type AuthenticationRow = Tables<"authentications">;
+type AssessmentRunRow = Tables<"assessment_runs">;
+
+const emptyIdentity: CandidateIdentity = {
+  popName: null,
+  popNumber: null,
+  series: null,
+  barcode: null,
+  productionCode: null,
+  factory: null,
+  releaseYear: null,
+  sticker: null,
+  region: null,
+  copyrightStamp: null,
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-interface AnomalyRegion {
-  imageIndex: number;
-  x: number;
-  y: number;
-  radius: number;
-  label: string;
-  severity: "critical" | "warning" | "info";
+function runIdentity(run: AssessmentRunRow): CandidateIdentity {
+  return isRecord(run.candidate_identity) ? run.candidate_identity as unknown as CandidateIdentity : emptyIdentity;
 }
 
-interface AnalysisDetails {
-  summary: string;
-  anomalies: string[];
-  anomalyRegions?: AnomalyRegion[];
-  perImage: { angle: string; notes: string }[];
-  categoryScores?: CategoryScores;
-  barcodeMatch?: string;
-  eraDetected?: string;
-  factoryCode?: string;
+function runObservations(run: AssessmentRunRow): StructuredObservation[] {
+  return Array.isArray(run.structured_observations)
+    ? run.structured_observations as unknown as StructuredObservation[]
+    : [];
 }
 
-const CATEGORY_INFO = [
-  { key: "typography" as const, label: "Typography & Logo", weight: "35%", letter: "T", description: "Halftone dots, font kerning, POP! logo, numbering" },
-  { key: "border" as const, label: "Art & Border", weight: "25%", letter: "A", description: "White border offset, print quality, box construction" },
-  { key: "barcode" as const, label: "Packaging & Serial", weight: "20%", letter: "P", description: "Social logos, manufacturer info, era consistency, serial codes" },
-  { key: "color" as const, label: "Vision & Mold", weight: "20%", letter: "VM", description: "Color calibration, paint quality, figure mold details" },
-];
-
-function ScoreGauge({ score }: { score: number }) {
-  const color = score >= 80 ? "hsl(var(--success))" : score >= 50 ? "hsl(var(--warning))" : "hsl(var(--destructive))";
-  const circumference = 251.2;
-  const filled = (score / 100) * circumference;
-
-  return (
-    <div className="relative w-48 h-48 mx-auto">
-      <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
-        <circle cx="50" cy="50" r="40" fill="none" stroke="hsl(var(--muted))" strokeWidth="6" />
-        <motion.circle
-          cx="50" cy="50" r="40"
-          fill="none"
-          stroke={color}
-          strokeWidth="6"
-          strokeLinecap="round"
-          strokeDasharray={`${circumference}`}
-          initial={{ strokeDashoffset: circumference }}
-          animate={{ strokeDashoffset: circumference - filled }}
-          transition={{ duration: 1.5, ease: "easeOut" }}
-        />
-      </svg>
-      <motion.div
-        className="absolute inset-0 flex flex-col items-center justify-center"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ delay: 0.8 }}
-      >
-        <span className="font-mono text-4xl font-black" style={{ color }}>{score}</span>
-        <span className="text-xs text-muted-foreground font-mono">/100</span>
-      </motion.div>
-    </div>
-  );
+function runDecision(run: AssessmentRunRow): DecisionResult | null {
+  return run.run_kind === "phase_1b" && isRecord(run.verdict)
+    ? run.verdict as unknown as DecisionResult
+    : null;
 }
 
-function CategoryRow({ label, score, weight, letter, description, delay }: {
-  label: string; score: number; weight: string; letter: string; description: string; delay: number;
-}) {
-  const color = score >= 70 ? "text-success" : score >= 40 ? "text-warning" : "text-destructive";
-  const barColor = score >= 70 ? "bg-success" : score >= 40 ? "bg-warning" : "bg-destructive";
+function runDimensions(run: AssessmentRunRow): AssessmentDimensions | null {
+  return run.run_kind === "phase_1b" && isRecord(run.dimensions)
+    ? run.dimensions as unknown as AssessmentDimensions
+    : null;
+}
 
-  return (
-    <motion.div
-      initial={{ opacity: 0, x: -20 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay }}
-      className="flex items-center gap-4 p-4 rounded-xl bg-secondary/30 border border-border/30"
-    >
-      <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center font-mono font-black text-primary text-sm shrink-0">
-        {letter}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-sm font-semibold truncate">{label}</span>
-          <span className={`font-mono text-sm font-bold ${color}`}>{score}</span>
-        </div>
-        <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-          <motion.div
-            className={`h-full rounded-full ${barColor}`}
-            initial={{ width: 0 }}
-            animate={{ width: `${score}%` }}
-            transition={{ duration: 1, ease: "easeOut", delay: delay + 0.2 }}
-          />
-        </div>
-        <p className="text-[11px] text-muted-foreground mt-1">{description} • Weight: {weight}</p>
-      </div>
-    </motion.div>
-  );
+function legacyScore(run: AssessmentRunRow, authentication: AuthenticationRow): number | null {
+  if (isRecord(run.verdict) && typeof run.verdict.legacyScore === "number") return run.verdict.legacyScore;
+  return authentication.score;
+}
+
+function verdictTone(verdictClass?: VerdictClass): { icon: typeof ShieldQuestion; color: string; border: string } {
+  if (verdictClass === "strong_counterfeit_indicators") return { icon: ShieldAlert, color: "text-destructive", border: "border-destructive/40" };
+  if (verdictClass === "elevated_counterfeit_risk") return { icon: ShieldAlert, color: "text-warning", border: "border-warning/40" };
+  if (verdictClass === "consistent_with_verified_references" || verdictClass === "no_material_anomaly_detected") {
+    return { icon: ShieldCheck, color: "text-success", border: "border-success/40" };
+  }
+  return { icon: ShieldQuestion, color: "text-warning", border: "border-warning/40" };
+}
+
+function reliabilityTone(reliability?: string): string {
+  if (reliability === "high") return "border-success/50 text-success bg-success/5";
+  if (reliability === "medium") return "border-primary/50 text-primary bg-primary/5";
+  if (reliability === "low") return "border-warning/50 text-warning bg-warning/5";
+  return "border-border text-muted-foreground bg-muted/20";
 }
 
 export default function Results() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const [auth, setAuth] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [authentication, setAuthentication] = useState<AuthenticationRow | null>(null);
+  const [runs, setRuns] = useState<AssessmentRunRow[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
-  const [releaseYear, setReleaseYear] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!id) return;
     const shareToken = new URLSearchParams(window.location.search).get("t");
-    const loader = async () => {
-      let data: any = null;
-      // Owner / admin path: direct select (RLS-scoped)
+    const load = async () => {
+      let row: AuthenticationRow | null = null;
       if (user) {
-        const { data: ownData } = await supabase
-          .from("authentications")
+        const { data } = await supabase.from("authentications").select("*").eq("id", id).maybeSingle();
+        row = data;
+      }
+      if (!row && shareToken) {
+        const { data } = await supabase.rpc("get_shared_authentication", { p_id: id, p_token: shareToken });
+        row = (Array.isArray(data) ? data[0] : data) as AuthenticationRow | null;
+      }
+
+      let loadedRuns: AssessmentRunRow[] = [];
+      if (row && user?.id === row.user_id) {
+        const { data } = await supabase
+          .from("assessment_runs")
           .select("*")
-          .eq("id", id)
-          .maybeSingle();
-        data = ownData;
+          .eq("authentication_id", row.id)
+          .order("created_at", { ascending: false });
+        loadedRuns = data || [];
+      } else if (row && shareToken) {
+        const { data } = await supabase.rpc("get_shared_assessment_runs", { p_id: row.id, p_token: shareToken });
+        loadedRuns = data || [];
       }
-      // Guest / non-owner path: token-gated RPC
-      if (!data && shareToken) {
-        const { data: shared } = await supabase.rpc("get_shared_authentication", {
-          p_id: id,
-          p_token: shareToken,
-        });
-        data = Array.isArray(shared) ? shared[0] : shared;
-      }
-      setAuth(data);
+
+      setAuthentication(row);
+      setRuns(loadedRuns);
+      setSelectedRunId(loadedRuns[0]?.id || null);
       setLoading(false);
 
-      // Look up reference image
-      if (data?.pop_name || data?.pop_number) {
-          let query = supabase.from("pop_reference_library").select("master_image_url, release_year");
-          if (data.pop_number) query = query.eq("pop_number", data.pop_number.replace("#", ""));
-          if (data.pop_name) query = query.ilike("name", `%${data.pop_name}%`);
-          query.limit(1).then(({ data: refs }) => {
-            if (refs?.[0]?.master_image_url) setReferenceImageUrl(refs[0].master_image_url);
-            if (refs?.[0]?.release_year) setReleaseYear(String(refs[0].release_year));
-          });
+      if (row?.pop_name || row?.pop_number) {
+        let query = supabase.from("pop_reference_library").select("master_image_url");
+        if (row.pop_number) query = query.eq("pop_number", row.pop_number.replace("#", ""));
+        if (row.pop_name) query = query.ilike("name", `%${row.pop_name}%`);
+        const { data } = await query.limit(1);
+        if (data?.[0]?.master_image_url) setReferenceImageUrl(data[0].master_image_url);
       }
     };
-    loader();
+    load();
   }, [id, user]);
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-4">
-          <ScanLine className="w-8 h-8 text-primary animate-pulse" />
-          <span className="font-mono text-sm text-muted-foreground">Loading report...</span>
-        </div>
-      </div>
-    );
-  }
+  const selectedRun = useMemo(
+    () => runs.find((run) => run.id === selectedRunId) || runs[0] || null,
+    [runs, selectedRunId],
+  );
 
-  if (!auth) {
+  if (loading) {
+    return <div className="flex min-h-screen items-center justify-center bg-background"><ScanLine className="h-8 w-8 animate-pulse text-primary" /></div>;
+  }
+  if (!authentication) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background flex-col gap-4">
-        <p className="text-muted-foreground">Analysis not found.</p>
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-background">
+        <p className="text-muted-foreground">Assessment not found.</p>
         <Button onClick={() => navigate("/")}>Go Home</Button>
       </div>
     );
   }
 
-  const score: number = auth.score ?? 0;
-  const analysisSource: string | null = auth.analysis_source ?? null;
-  const sourceDisclosure = getAnalysisSourceDisclosure(analysisSource);
-  const details: AnalysisDetails = (auth.details as AnalysisDetails) || { summary: "", anomalies: [], perImage: [] };
-  const categoryScores = details.categoryScores;
-
-  const photoCount = (details as any).photoCount || auth.image_urls?.length || 0;
-  const isPartial = photoCount < 6;
-
-  const VerdictIcon = score >= 80 ? ShieldCheck : score >= 50 ? ShieldQuestion : ShieldAlert;
-  const verdictLabel = getSourceAwareVerdict(score, analysisSource);
-  const verdictColor = score >= 80 ? "text-success" : score >= 50 ? "text-warning" : "text-destructive";
-  const glowClass = score >= 80 ? "glow-green" : score >= 50 ? "glow-amber" : "glow-red";
+  const decision = selectedRun ? runDecision(selectedRun) : null;
+  const dimensions = selectedRun ? runDimensions(selectedRun) : null;
+  const identity = selectedRun ? runIdentity(selectedRun) : emptyIdentity;
+  const observations = selectedRun ? runObservations(selectedRun) : [];
+  const disclosure = getAnalysisSourceDisclosure(selectedRun?.source || authentication.analysis_source);
+  const tone = verdictTone(decision?.verdictClass);
+  const VerdictIcon = tone.icon;
+  const supporting = observations.filter((item) => item.findingType === "supporting_consistency" && item.observationStatus === "observed");
+  const risks = observations.filter((item) => item.findingType === "risk_indicator" && item.observationStatus === "observed");
+  const selectedIndex = selectedRun ? runs.findIndex((run) => run.id === selectedRun.id) : -1;
+  const priorRun = selectedIndex >= 0 ? runs[selectedIndex + 1] || null : null;
+  const priorDecision = priorRun ? runDecision(priorRun) : null;
+  const priorDimensions = priorRun ? runDimensions(priorRun) : null;
+  const runDifferences = priorRun ? [
+    `Verdict: ${priorDecision?.verdictClass || "legacy"} -> ${decision?.verdictClass || "legacy"}`,
+    `Reliability: ${priorDimensions?.assessmentReliability || "legacy"} -> ${dimensions?.assessmentReliability || "legacy"}`,
+    `Evidence quality: ${priorDimensions?.evidenceQuality || "legacy"} -> ${dimensions?.evidenceQuality || "legacy"}`,
+    `Structured observations: ${runObservations(priorRun).length} -> ${observations.length}`,
+  ] : [];
 
   return (
     <div className="min-h-screen bg-background">
-      <nav className="flex items-center gap-4 px-6 py-4 max-w-4xl mx-auto">
-        <Button variant="ghost" size="icon" onClick={() => navigate("/collection")}>
-          <ArrowLeft className="w-5 h-5" />
-        </Button>
-        <div className="flex items-center gap-2">
-          <FileText className="w-5 h-5 text-primary" />
-          <h2 className="font-display text-lg font-bold tracking-tight">V-STAMP Report</h2>
-        </div>
+      <nav className="mx-auto flex max-w-4xl items-center gap-4 px-6 py-4">
+        <Button variant="ghost" size="icon" onClick={() => navigate("/collection")}><ArrowLeft className="h-5 w-5" /></Button>
+        <FileText className="h-5 w-5 text-primary" />
+        <h2 className="font-display text-lg font-bold tracking-tight">POPCHECK AI Assessment Report</h2>
       </nav>
 
-      <main className="max-w-4xl mx-auto px-6 pb-20 space-y-6">
-        {/* Score card */}
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
-          <Card className={`${glowClass} border-border/50`}>
-            <CardContent className="flex flex-col items-center py-10">
-              <ScoreGauge score={score} />
-              <div className="mt-6 flex items-center gap-3">
-                <VerdictIcon className={`w-7 h-7 ${verdictColor}`} />
-                <span className={`font-mono text-sm font-bold ${verdictColor} tracking-wider`}>
-                  {verdictLabel}
-                </span>
+      <main className="mx-auto max-w-4xl space-y-6 px-6 pb-20">
+        {["failed", "evidence_required"].includes(authentication.status) && (
+          <Card className="border-warning/50 bg-warning/5">
+            <CardContent className="flex items-start gap-3 py-5">
+              <AlertTriangle className="mt-0.5 h-5 w-5 text-warning" />
+              <div>
+                <p className="font-semibold">The latest analysis attempt did not produce a verdict.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Submission status: {authentication.status.replaceAll("_", " ")}. Any assessment shown below is an earlier immutable run.</p>
               </div>
-              {isPartial && (
-                <div className="mt-3 px-3 py-1.5 rounded-full bg-muted border border-border">
-                  <span className="text-xs font-mono text-muted-foreground">
-                    {"📸 Partial analysis (" + photoCount + "/6 photos)"}
-                  </span>
-                </div>
-              )}
-              {sourceDisclosure && (
-                <div role="alert" className="mt-4 max-w-2xl rounded-lg border border-warning/50 bg-warning/10 px-4 py-3 text-center">
-                  <p className="text-sm font-semibold text-warning">Legacy listing-image assessment</p>
-                  <p className="mt-1 text-xs text-muted-foreground">{sourceDisclosure}</p>
-                </div>
-              )}
-              {(details as any).cacheHit && (
-                <div className="mt-3 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/30">
-                  <span className="text-xs font-mono text-primary">⚡ INSTANT VERDICT · Pre-validated from Reference Library</span>
-                </div>
-              )}
-              {auth.pop_name && (
-                <p className="mt-3 text-muted-foreground font-mono text-sm">
-                  {auth.pop_name} {auth.pop_number && `#${auth.pop_number}`}
-                </p>
-              )}
-              {details.barcodeMatch === "mismatch" && (
-                <div className="mt-3 px-3 py-1.5 rounded-full bg-destructive/10 border border-destructive/30">
-                  <span className="text-xs font-mono text-destructive">⚠ BARCODE MISMATCH — PENALTY APPLIED (−15)</span>
-                </div>
-              )}
-              {details.barcodeMatch === "no_reference" && (
-                <div className="mt-3 px-3 py-1.5 rounded-full bg-warning/10 border border-warning/30">
-                  <span className="text-xs font-mono text-warning">⚠ BARCODE — Manual Verification Required</span>
-                </div>
-              )}
-              {details.eraDetected && (
-                <div className="mt-2 flex items-center gap-2">
-                  <Badge variant="outline" className="font-mono text-[10px]">ERA: {details.eraDetected}</Badge>
-                  {details.factoryCode && <Badge variant="outline" className="font-mono text-[10px]">FACTORY: {details.factoryCode}</Badge>}
-                </div>
-              )}
             </CardContent>
           </Card>
-        </motion.div>
-
-        {/* Comparison Slider */}
-        {referenceImageUrl && auth.image_urls?.[0] && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
-            <ComparisonSlider
-              userImageUrl={auth.image_urls[0]}
-              referenceImageUrl={referenceImageUrl}
-              popName={auth.pop_name}
-            />
-          </motion.div>
         )}
 
-        {/* V-STAMP Breakdown */}
-        {categoryScores && (
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15 }}>
-            <Card className="border-border/50">
-              <CardHeader>
-                <CardTitle className="font-display text-lg tracking-tight flex items-center gap-2">
-                  <ScanLine className="w-5 h-5 text-primary" />
-                  V-STAMP Breakdown
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {CATEGORY_INFO.map((cat, i) => {
-                  const s = categoryScores[cat.key] ?? 0;
-                  if (s < 0) return (
-                    <div key={cat.key} className="flex items-center gap-4 p-4 rounded-xl bg-secondary/30 border border-border/30 opacity-50">
-                      <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center font-mono font-black text-muted-foreground text-sm shrink-0">{cat.letter}</div>
-                      <div className="flex-1">
-                        <span className="text-sm font-semibold">{cat.label}</span>
-                        <p className="text-xs text-muted-foreground">Not evaluable — photo missing</p>
-                      </div>
-                    </div>
-                  );
-                  return (
-                    <CategoryRow
-                      key={cat.key}
-                      label={cat.label}
-                      score={s}
-                      weight={cat.weight}
-                      letter={cat.letter}
-                      description={cat.description}
-                      delay={0.2 + i * 0.1}
-                    />
-                  );
-                })}
+        {!selectedRun && (
+          <Card className="border-warning/40">
+            <CardContent className="flex items-start gap-3 py-6">
+              <Clock3 className="mt-0.5 h-5 w-5 text-warning" />
+              <div>
+                <p className="font-semibold">No completed assessment run is available.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Current submission status: {authentication.status}</p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {selectedRun?.run_kind === "legacy" && (
+          <Card className="border-warning/40 bg-warning/5">
+            <CardHeader><CardTitle className="text-lg">Legacy V-STAMP score (uncalibrated historical data)</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <p className="font-mono text-2xl font-black text-warning">{legacyScore(selectedRun, authentication) ?? "Unavailable"}{legacyScore(selectedRun, authentication) != null ? "/100" : ""}</p>
+              <p className="text-sm text-muted-foreground">This historical value is retained for compatibility only. It is not a calibrated probability and is not used by the Phase 1B decision engine.</p>
+              <div className="flex flex-wrap gap-2 text-xs font-mono">
+                <Badge variant="outline">Legacy engine: {selectedRun.decision_engine_version}</Badge>
+                <Badge variant="outline">Legacy prompt: {selectedRun.prompt_version}</Badge>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {decision && dimensions && (
+          <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}>
+            <Card className={tone.border}>
+              <CardContent className="py-8">
+                <div className="flex items-start gap-4">
+                  <VerdictIcon className={`mt-1 h-8 w-8 shrink-0 ${tone.color}`} />
+                  <div>
+                    <p className="text-xs font-mono uppercase tracking-widest text-muted-foreground">Final verdict</p>
+                    <h1 className={`mt-1 font-display text-2xl font-bold ${tone.color}`}>{decision.userFacingTitle}</h1>
+                    <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">{decision.explanation}</p>
+                  </div>
+                </div>
+                <div className="mt-6 grid gap-3 sm:grid-cols-3">
+                  <Dimension label="Assessment reliability" value={dimensions.assessmentReliability} className={reliabilityTone(dimensions.assessmentReliability)} />
+                  <Dimension label="Evidence quality" value={dimensions.evidenceQuality} />
+                  <Dimension label="Reference coverage" value={dimensions.referenceCoverage} />
+                </div>
               </CardContent>
             </Card>
           </motion.div>
         )}
 
-        {/* Investigative Notes */}
-        {details.summary && (
+        {disclosure && (
+          <div role="alert" className="rounded-lg border border-warning/50 bg-warning/10 px-4 py-3">
+            <p className="text-sm font-semibold text-warning">Legacy listing-image assessment</p>
+            <p className="mt-1 text-xs text-muted-foreground">{disclosure}</p>
+          </div>
+        )}
+
+        {selectedRun?.source === "physical_scan" && (
+          <div className="rounded-lg border border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
+            This AI-assisted assessment evaluates consistency with the evidence and references available to POPCHECK. It is not a legal or expert certificate of authenticity.
+          </div>
+        )}
+
+        {selectedRun && (
           <Card className="border-border/50">
-            <CardHeader>
-              <CardTitle className="font-display text-lg tracking-tight">Investigative Notes</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-muted-foreground leading-relaxed">{details.summary}</p>
+            <CardHeader><CardTitle className="text-lg">Candidate product identity</CardTitle></CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2">
+              <IdentityField label="Product" value={identity.popName} />
+              <IdentityField label="Pop number" value={identity.popNumber} />
+              <IdentityField label="Series" value={identity.series} />
+              <IdentityField label="Barcode" value={identity.barcode} />
+              <IdentityField label="Production code" value={identity.productionCode} />
+              <IdentityField label="Factory" value={identity.factory} />
             </CardContent>
           </Card>
         )}
 
-        {/* Evidence */}
-        {details.anomalies?.length > 0 && (
-          <Card className="border-destructive/30">
-            <CardHeader>
-              <CardTitle className="font-display text-lg tracking-tight text-destructive flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5" />
-                Red Flags Detected
-              </CardTitle>
-            </CardHeader>
+        {referenceImageUrl && authentication.image_urls?.[0] && (
+          <ComparisonSlider userImageUrl={authentication.image_urls[0]} referenceImageUrl={referenceImageUrl} popName={identity.popName || authentication.pop_name} />
+        )}
+
+        {decision && dimensions && (
+          <Card className="border-border/50">
+            <CardHeader><CardTitle className="text-lg">Assessment dimensions</CardTitle></CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2">
+              <Dimension label="Identity status" value={dimensions.identityStatus} />
+              <Dimension label="Visual consistency" value={dimensions.visualConsistency} />
+              <Dimension label="Code consistency" value={dimensions.codeConsistency} />
+              <Dimension label="Counterfeit indicator strength" value={dimensions.counterfeitIndicatorStrength} />
+            </CardContent>
+          </Card>
+        )}
+
+        {decision && <ObservationSection title="Visible supporting evidence" icon={ShieldCheck} items={supporting} empty="No supporting consistency observation was recorded." tone="text-success" />}
+        {decision && <ObservationSection title="Visible risk indicators" icon={AlertTriangle} items={risks} empty="No material visible risk indicator was recorded." tone="text-destructive" />}
+
+        {decision && (
+          <div className="grid gap-6 md:grid-cols-2">
+            <TextList title="Limitations" items={decision.limitations} empty="No additional limitation was recorded." />
+            <TextList title="Additional photos required" items={decision.missingEvidence} empty="No additional photograph was requested." />
+          </div>
+        )}
+
+        {selectedRun && (
+          <Card className="border-border/50">
+            <CardHeader><CardTitle className="text-lg">Traceability</CardTitle></CardHeader>
+            <CardContent className="grid gap-2 text-xs font-mono text-muted-foreground sm:grid-cols-2">
+              <span>Model: {selectedRun.model}</span>
+              <span>Prompt: {selectedRun.prompt_version}</span>
+              <span>Decision engine: {selectedRun.decision_engine_version}</span>
+              <span>Source: {selectedRun.source}</span>
+            </CardContent>
+          </Card>
+        )}
+
+        {runs.length > 0 && (
+          <Card className="border-border/50">
+            <CardHeader><CardTitle className="flex items-center gap-2 text-lg"><History className="h-5 w-5 text-primary" />Assessment history</CardTitle></CardHeader>
             <CardContent className="space-y-2">
-              {details.anomalies.map((a, i) => (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.4 + i * 0.08 }}
-                  className="flex items-start gap-3 p-3 rounded-lg bg-destructive/5 border border-destructive/15"
-                >
-                  <span className="font-mono text-destructive text-xs mt-0.5">#{String(i + 1).padStart(2, "0")}</span>
-                  <span className="text-sm">{a}</span>
-                </motion.div>
-              ))}
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Per-image with anomaly overlays */}
-        {details.perImage?.length > 0 && (
-          <Card className="border-border/50">
-            <CardHeader>
-              <CardTitle className="font-display text-lg tracking-tight flex items-center gap-2">
-                <Eye className="w-5 h-5 text-primary" />
-                Per-Image Analysis
-              </CardTitle>
-              {(details.anomalyRegions?.length ?? 0) > 0 && (
-                 <p className="text-xs text-muted-foreground">
-                   🔴 Red circles indicate anomalous areas detected by the AI
-                </p>
-              )}
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {details.perImage.map((item, i) => {
-                const regions = details.anomalyRegions?.filter(r => r.imageIndex === i) || [];
+              {runs.map((run, index) => {
+                const historyDecision = runDecision(run);
+                const historyDimensions = runDimensions(run);
                 return (
-                  <div key={i} className="flex gap-4 items-start p-3 rounded-lg bg-secondary/20">
-                    {auth.image_urls?.[i] && (
-                      <div className="relative w-32 h-32 shrink-0">
-                        <img
-                          src={auth.image_urls[i]}
-                          alt={item.angle}
-                          className="w-full h-full rounded-lg object-cover border border-border"
-                        />
-                        {/* Anomaly overlay circles */}
-                        <svg
-                          className="absolute inset-0 w-full h-full pointer-events-none"
-                          viewBox="0 0 100 100"
-                          preserveAspectRatio="none"
-                        >
-                          {regions.map((region, ri) => {
-                            const strokeColor =
-                              region.severity === "critical"
-                                ? "hsl(var(--destructive))"
-                                : region.severity === "warning"
-                                ? "hsl(var(--warning))"
-                                : "hsl(var(--primary))";
-                            return (
-                              <g key={ri}>
-                                <circle
-                                  cx={region.x}
-                                  cy={region.y}
-                                  r={region.radius}
-                                  fill="none"
-                                  stroke={strokeColor}
-                                  strokeWidth="1.5"
-                                  strokeDasharray="3 2"
-                                  opacity="0.9"
-                                />
-                                <circle
-                                  cx={region.x}
-                                  cy={region.y}
-                                  r={region.radius}
-                                  fill={strokeColor}
-                                  opacity="0.15"
-                                />
-                              </g>
-                            );
-                          })}
-                        </svg>
-                        {/* Anomaly labels */}
-                        {regions.map((region, ri) => (
-                          <div
-                            key={ri}
-                            className="absolute text-[8px] font-mono font-bold px-1 py-0.5 rounded whitespace-nowrap"
-                            style={{
-                              left: `${Math.min(region.x, 75)}%`,
-                              top: `${Math.min(region.y + region.radius + 2, 90)}%`,
-                              color: region.severity === "critical" ? "hsl(var(--destructive))" : region.severity === "warning" ? "hsl(var(--warning))" : "hsl(var(--primary))",
-                              background: "hsl(var(--card) / 0.85)",
-                            }}
-                          >
-                            {region.label}
-                          </div>
-                        ))}
+                  <button
+                    key={run.id}
+                    onClick={() => setSelectedRunId(run.id)}
+                    className={`w-full rounded-lg border p-3 text-left transition-colors ${selectedRun?.id === run.id ? "border-primary bg-primary/5" : "border-border hover:border-primary/30"}`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold">{run.run_kind === "legacy" ? "Legacy V-STAMP score" : historyDecision?.userFacingTitle || "Assessment run"}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">{new Date(run.created_at).toLocaleString()} | {run.prompt_version} | Reliability: {historyDimensions?.assessmentReliability || "legacy"}</p>
                       </div>
-                    )}
-                    <div className="flex-1">
-                      <p className="font-mono text-xs text-primary uppercase tracking-wider mb-1">{item.angle}</p>
-                      <p className="text-sm text-muted-foreground">{item.notes}</p>
-                      {regions.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {regions.map((r, ri) => (
-                            <Badge
-                              key={ri}
-                              variant="outline"
-                              className={`text-[10px] font-mono ${
-                                r.severity === "critical"
-                                  ? "border-destructive/50 text-destructive"
-                                  : r.severity === "warning"
-                                  ? "border-warning/50 text-warning"
-                                  : "border-primary/50 text-primary"
-                              }`}
-                            >
-                              {r.severity === "critical" ? "🔴" : r.severity === "warning" ? "🟡" : "🔵"} {r.label}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
+                      {index === 0 && <Badge>Latest</Badge>}
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </CardContent>
           </Card>
         )}
 
-        {/* Flag Report - only for authenticated users */}
-        {user && <FlagReportSection reportId={id!} />}
-        {!user && (
+        {priorRun && (
           <Card className="border-border/50">
-            <CardContent className="py-4 flex items-center justify-between">
-              <span className="text-sm text-muted-foreground">Sign in to flag errors or access more features</span>
-              <Button size="sm" onClick={() => navigate("/auth")}>Sign In</Button>
+            <CardHeader><CardTitle className="text-lg">Run comparison</CardTitle></CardHeader>
+            <CardContent>
+              <p className="mb-3 text-xs text-muted-foreground">This selected run is compared with the immediately preceding immutable run. A difference does not rewrite or correct the earlier result.</p>
+              <ul className="space-y-2 text-sm text-muted-foreground">
+                {runDifferences.map((difference) => <li key={difference}>- {difference}</li>)}
+              </ul>
             </CardContent>
           </Card>
         )}
 
-        <div className="flex gap-3">
+        {user && <FlagReportSection reportId={authentication.id} />}
+
+        {selectedRun && (
           <Button
             variant="outline"
-            className="flex-1 border-primary/30 text-primary hover:bg-primary/10"
+            className="w-full border-primary/30 text-primary"
             onClick={() => {
-              const shareToken = auth.share_token;
-              const publicUrl = shareToken
-                ? `${window.location.origin}/results/${id}?t=${shareToken}`
-                : `${window.location.origin}/results/${id}`;
-              const frontImg = auth.image_urls?.[0] || null;
-              generateCertificatePDF({
-                reportId: id!,
-                popName: auth.pop_name,
-                popNumber: auth.pop_number?.replace("#", "") || null,
-                score,
-                summary: details.summary || "",
-                eraDetected: details.eraDetected,
-                releaseYear,
-                seriesLine: (details as any).seriesLine || null,
-                date: new Date(auth.created_at).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
+              const publicUrl = authentication.share_token
+                ? `${window.location.origin}/results/${authentication.id}?t=${authentication.share_token}`
+                : `${window.location.origin}/results/${authentication.id}`;
+              generateAssessmentReportPDF({
+                reportId: authentication.id,
+                runId: selectedRun.id,
+                runKind: selectedRun.run_kind as "phase_1b" | "legacy",
+                date: new Date(selectedRun.created_at).toLocaleDateString(),
                 publicUrl,
-                frontImageUrl: frontImg,
-                analysisSource,
+                analysisSource: selectedRun.source,
+                model: selectedRun.model,
+                promptVersion: selectedRun.prompt_version,
+                decisionEngineVersion: selectedRun.decision_engine_version,
+                identity,
+                dimensions: dimensions || undefined,
+                decision: decision || undefined,
+                observations,
+                legacyScore: selectedRun.run_kind === "legacy" ? legacyScore(selectedRun, authentication) : null,
+                frontImageUrl: authentication.image_urls?.[0] || null,
               });
-              toast.success(analysisSource === "listing_legacy" ? "Listing assessment PDF generated!" : "PDF Certificate generated!");
+              toast.success("AI assessment report generated.");
             }}
           >
-            <Download className="w-4 h-4 mr-2" /> {analysisSource === "listing_legacy" ? "Download Listing Assessment PDF" : "Download PDF Certificate"}
+            <Download className="mr-2 h-4 w-4" />Download AI Assessment Report
           </Button>
-        </div>
-        {/* Re-analyze: only owner of an UNCERTAIN / FAKE scan can re-run */}
-        {user && user.id === auth.user_id && score < 80 && auth.status === "completed" && (
-          <ReanalyzeButton auth={auth} />
         )}
+
+        {user?.id === authentication.user_id && authentication.image_urls?.length && (
+          <ReanalyzeButton authenticationId={authentication.id} onComplete={() => window.location.reload()} />
+        )}
+
         <div className="flex gap-3">
-          {user ? (
-            <>
-              <Button variant="outline" className="flex-1" onClick={() => navigate("/upload")}>
-                New Analysis
-              </Button>
-              <Button className="flex-1" onClick={() => navigate("/collection")}>
-                <Home className="w-4 h-4 mr-2" /> Collection
-              </Button>
-            </>
-          ) : (
-            <Button className="flex-1" onClick={() => navigate("/auth")}>
-              Sign up to analyze your Pops
-            </Button>
-          )}
+          <Button variant="outline" className="flex-1" onClick={() => navigate("/upload")}>New submission</Button>
+          <Button className="flex-1" onClick={() => navigate("/collection")}><Home className="mr-2 h-4 w-4" />Collection</Button>
         </div>
       </main>
     </div>
+  );
+}
+
+function Dimension({ label, value, className = "border-border bg-muted/20 text-foreground" }: { label: string; value: string; className?: string }) {
+  return (
+    <div className={`rounded-lg border px-3 py-2 ${className}`}>
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
+      <p className="mt-1 font-mono text-sm font-bold">{value.replaceAll("_", " ")}</p>
+    </div>
+  );
+}
+
+function IdentityField({ label, value }: { label: string; value: string | null }) {
+  return (
+    <div className="rounded-lg bg-muted/20 px-3 py-2">
+      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
+      <p className="mt-1 text-sm font-semibold">{value || "Not visible / not identified"}</p>
+    </div>
+  );
+}
+
+function ObservationSection({ title, icon: Icon, items, empty, tone }: {
+  title: string;
+  icon: typeof Eye;
+  items: StructuredObservation[];
+  empty: string;
+  tone: string;
+}) {
+  return (
+    <Card className="border-border/50">
+      <CardHeader><CardTitle className={`flex items-center gap-2 text-lg ${tone}`}><Icon className="h-5 w-5" />{title}</CardTitle></CardHeader>
+      <CardContent className="space-y-3">
+        {!items.length && <p className="text-sm text-muted-foreground">{empty}</p>}
+        {items.map((item, index) => (
+          <div key={`${item.code}-${index}`} className="rounded-lg border border-border/50 bg-muted/10 p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" className="font-mono text-[10px]">{item.code}</Badge>
+              <Badge variant="outline" className="text-[10px]">{item.severity}</Badge>
+              <span className="text-[10px] text-muted-foreground">Confidence in observation: {item.confidenceLevel}</span>
+            </div>
+            <p className="mt-2 text-sm">{item.finding}</p>
+            <p className="mt-1 text-xs text-muted-foreground">Image {item.imageIndex == null ? "not assigned" : item.imageIndex + 1} | {item.visibleRegion || "region not specified"} | Reference: {item.referenceReliability}</p>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TextList({ title, items, empty }: { title: string; items: string[]; empty: string }) {
+  return (
+    <Card className="border-border/50">
+      <CardHeader><CardTitle className="text-lg">{title}</CardTitle></CardHeader>
+      <CardContent>
+        {!items.length ? <p className="text-sm text-muted-foreground">{empty}</p> : (
+          <ul className="space-y-2 text-sm text-muted-foreground">{items.map((item, index) => <li key={index}>- {item}</li>)}</ul>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -532,32 +455,11 @@ function FlagReportSection({ reportId }: { reportId: string }) {
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [comment, setComment] = useState("");
-  const [trait, setTrait] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
-  if (submitted) {
-    return (
-      <Card className="border-success/30">
-        <CardContent className="py-4 flex items-center gap-3">
-          <Flag className="w-5 h-5 text-success" />
-          <span className="text-sm text-success font-mono">Report submitted — thank you for your feedback!</span>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (!open) {
-    return (
-      <Button
-        variant="outline"
-        className="w-full border-warning/30 text-warning hover:bg-warning/10"
-        onClick={() => setOpen(true)}
-      >
-        <Flag className="w-4 h-4 mr-2" /> Report a possible AI error
-      </Button>
-    );
-  }
+  if (submitted) return <Card className="border-success/30"><CardContent className="py-4 text-sm text-success">Report submitted. Thank you for your feedback.</CardContent></Card>;
+  if (!open) return <Button variant="outline" className="w-full border-warning/30 text-warning" onClick={() => setOpen(true)}><Flag className="mr-2 h-4 w-4" />Report a possible AI error</Button>;
 
   const submit = async () => {
     if (!user) return;
@@ -566,105 +468,50 @@ function FlagReportSection({ reportId }: { reportId: string }) {
       report_id: reportId,
       user_id: user.id,
       user_comment: comment,
-      detected_fake_trait: trait,
     });
     setSubmitting(false);
-    if (error) { toast.error("Error submitting report"); return; }
+    if (error) return toast.error("Error submitting report");
     setSubmitted(true);
   };
 
   return (
     <Card className="border-warning/30">
-      <CardHeader>
-        <CardTitle className="text-sm font-mono flex items-center gap-2 text-warning">
-          <Flag className="w-4 h-4" /> Report AI Error
-        </CardTitle>
-      </CardHeader>
+      <CardHeader><CardTitle className="text-sm">Report AI error</CardTitle></CardHeader>
       <CardContent className="space-y-3">
-        <Textarea
-          value={comment}
-          onChange={(e) => setComment(e.target.value)}
-          placeholder="Describe why you think the verdict is incorrect..."
-          className="bg-secondary/20 text-sm"
-          rows={3}
-        />
-        <Textarea
-          value={trait}
-          onChange={(e) => setTrait(e.target.value)}
-          placeholder="Specific trait detected (e.g. 'POP! logo without halftone', 'Border too uniform')"
-          className="bg-secondary/20 text-sm"
-          rows={2}
-        />
+        <Textarea value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Describe the observation or decision issue." rows={3} />
         <div className="flex gap-2">
-          <Button size="sm" onClick={submit} disabled={submitting || !comment}>
-             {submitting ? "Submitting..." : "Submit Report"}
-           </Button>
-           <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button size="sm" onClick={submit} disabled={submitting || !comment}>{submitting ? "Submitting..." : "Submit report"}</Button>
+          <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
         </div>
       </CardContent>
     </Card>
   );
 }
 
-function ReanalyzeButton({ auth }: { auth: any }) {
-  const navigate = useNavigate();
+function ReanalyzeButton({ authenticationId, onComplete }: { authenticationId: string; onComplete: () => void }) {
   const [busy, setBusy] = useState(false);
-
-  const handleReanalyze = async () => {
-    if (!auth?.image_urls?.length) {
-      toast.error("Original photos missing — cannot re-analyze.");
-      return;
-    }
+  const runAgain = async () => {
     setBusy(true);
-    try {
-      const { data: newAuth, error: insertError } = await supabase
-        .from("authentications")
-        .insert({
-          user_id: auth.user_id,
-          image_urls: auth.image_urls,
-          status: "analyzing",
-        })
-        .select()
-        .single();
-      if (insertError) throw insertError;
-
-      const { error: fnError } = await supabase.functions.invoke("analyze-funko", {
-        body: { authenticationId: newAuth.id },
-      });
-      if (fnError) throw fnError;
-      toast.success("Re-analysis complete!");
-      navigate(`/results/${newAuth.id}`);
-    } catch (err: any) {
-      console.error(err);
-      toast.error(err.message || "Re-analysis failed. Please try again.");
-    } finally {
-      setBusy(false);
-    }
+    const { error } = await supabase.functions.invoke("analyze-funko", { body: { authenticationId } });
+    setBusy(false);
+    if (error) return toast.error("New assessment version failed. Earlier runs were preserved.");
+    toast.success("New assessment version appended. Earlier runs remain unchanged.");
+    onComplete();
   };
 
   return (
-    <Card className="border-warning/30 bg-warning/5">
-      <CardContent className="py-4 flex flex-col sm:flex-row gap-3 sm:items-center justify-between">
+    <Card className="border-primary/30 bg-primary/5">
+      <CardContent className="flex flex-col justify-between gap-4 py-4 sm:flex-row sm:items-center">
         <div className="flex items-start gap-3">
-          <RefreshCw className="w-5 h-5 text-warning shrink-0 mt-0.5" />
+          <RefreshCw className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
           <div>
-            <p className="text-sm font-semibold text-warning">Not satisfied with this verdict?</p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Run a fresh forensic pass on the same photos. Results may vary as our AI evolves.
-            </p>
+            <p className="text-sm font-semibold">Create a new assessment version</p>
+            <p className="mt-1 text-xs text-muted-foreground">A new immutable run will be appended to this submission. It will not replace or correct earlier history.</p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          className="border-warning/40 text-warning hover:bg-warning/10 shrink-0"
-          onClick={handleReanalyze}
-          disabled={busy}
-        >
-          {busy ? (
-            <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Re-analyzing...</>
-          ) : (
-            <><RefreshCw className="w-4 h-4 mr-2" /> Re-analyze</>
-          )}
+        <Button variant="outline" onClick={runAgain} disabled={busy}>
+          {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+          Append new run
         </Button>
       </CardContent>
     </Card>
