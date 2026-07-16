@@ -100,6 +100,7 @@ export type Database = {
         Row: {
           authentication_id: string
           candidate_identity: Json
+          completion_token: string | null
           created_at: string
           decision_engine_version: string
           dimensions: Json
@@ -112,12 +113,14 @@ export type Database = {
           prompt_version: string
           run_kind: string
           source: string
+          structured_guidance_version_id: string | null
           structured_observations: Json
           verdict: Json
         }
         Insert: {
           authentication_id: string
           candidate_identity: Json
+          completion_token?: string | null
           created_at?: string
           decision_engine_version: string
           dimensions: Json
@@ -130,12 +133,14 @@ export type Database = {
           prompt_version: string
           run_kind?: string
           source: string
+          structured_guidance_version_id?: string | null
           structured_observations: Json
           verdict: Json
         }
         Update: {
           authentication_id?: string
           candidate_identity?: Json
+          completion_token?: string | null
           created_at?: string
           decision_engine_version?: string
           dimensions?: Json
@@ -148,6 +153,7 @@ export type Database = {
           prompt_version?: string
           run_kind?: string
           source?: string
+          structured_guidance_version_id?: string | null
           structured_observations?: Json
           verdict?: Json
         }
@@ -164,6 +170,13 @@ export type Database = {
             columns: ["guidance_version_id"]
             isOneToOne: false
             referencedRelation: "ai_guidance_versions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "assessment_runs_structured_guidance_version_id_fkey"
+            columns: ["structured_guidance_version_id"]
+            isOneToOne: false
+            referencedRelation: "structured_guidance_versions"
             referencedColumns: ["id"]
           },
         ]
@@ -514,6 +527,65 @@ export type Database = {
         }
         Relationships: []
       }
+      structured_guidance_versions: {
+        Row: {
+          action: string
+          applicable_product_id: string | null
+          applicable_release_range: unknown
+          applicable_variant_id: string | null
+          created_at: string
+          created_by: string
+          guidance_type: string
+          id: string
+          inspection_area: string
+          previous_version_id: string | null
+          priority: string
+          reference_requirement: string
+          structured_note: string
+          version: number
+        }
+        Insert: {
+          action: string
+          applicable_product_id?: string | null
+          applicable_release_range?: unknown
+          applicable_variant_id?: string | null
+          created_at?: string
+          created_by: string
+          guidance_type: string
+          id?: string
+          inspection_area: string
+          previous_version_id?: string | null
+          priority: string
+          reference_requirement: string
+          structured_note?: string
+          version: number
+        }
+        Update: {
+          action?: string
+          applicable_product_id?: string | null
+          applicable_release_range?: unknown
+          applicable_variant_id?: string | null
+          created_at?: string
+          created_by?: string
+          guidance_type?: string
+          id?: string
+          inspection_area?: string
+          previous_version_id?: string | null
+          priority?: string
+          reference_requirement?: string
+          structured_note?: string
+          version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "structured_guidance_versions_previous_version_id_fkey"
+            columns: ["previous_version_id"]
+            isOneToOne: false
+            referencedRelation: "structured_guidance_versions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_roles: {
         Row: {
           id: string
@@ -537,6 +609,56 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      backfill_legacy_assessment_runs: { Args: never; Returns: number }
+      complete_phase_1b_assessment: {
+        Args: {
+          p_authentication_id: string
+          p_candidate_identity: Json
+          p_completion_token: string
+          p_created_at: string
+          p_decision_engine_version: string
+          p_dimensions: Json
+          p_expected_previous_run_id: string
+          p_legacy_unverified_references_used: boolean
+          p_limitations: Json
+          p_missing_evidence: Json
+          p_model: string
+          p_observation_schema_version: string
+          p_prompt_version: string
+          p_snapshot: Json
+          p_source: string
+          p_structured_guidance_version_id: string
+          p_structured_observations: Json
+          p_user_id: string
+          p_verdict: Json
+        }
+        Returns: {
+          authentication_id: string
+          candidate_identity: Json
+          completion_token: string | null
+          created_at: string
+          decision_engine_version: string
+          dimensions: Json
+          guidance_version_id: string | null
+          id: string
+          limitations: Json
+          missing_evidence: Json
+          model: string
+          observation_schema_version: string
+          prompt_version: string
+          run_kind: string
+          source: string
+          structured_guidance_version_id: string | null
+          structured_observations: Json
+          verdict: Json
+        }
+        SetofOptions: {
+          from: "*"
+          to: "assessment_runs"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       create_ai_guidance_version: {
         Args: { p_category: string; p_guidance: string }
         Returns: {
@@ -555,11 +677,48 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      create_structured_guidance_version: {
+        Args: {
+          p_action: string
+          p_applicable_product_id: string
+          p_applicable_variant_id: string
+          p_guidance_type: string
+          p_inspection_area: string
+          p_priority: string
+          p_reference_requirement: string
+          p_release_year_from: number
+          p_release_year_to: number
+          p_structured_note: string
+        }
+        Returns: {
+          action: string
+          applicable_product_id: string | null
+          applicable_release_range: unknown
+          applicable_variant_id: string | null
+          created_at: string
+          created_by: string
+          guidance_type: string
+          id: string
+          inspection_area: string
+          previous_version_id: string | null
+          priority: string
+          reference_requirement: string
+          structured_note: string
+          version: number
+        }
+        SetofOptions: {
+          from: "*"
+          to: "structured_guidance_versions"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       get_shared_assessment_runs: {
         Args: { p_id: string; p_token: string }
         Returns: {
           authentication_id: string
           candidate_identity: Json
+          completion_token: string | null
           created_at: string
           decision_engine_version: string
           dimensions: Json
@@ -572,6 +731,7 @@ export type Database = {
           prompt_version: string
           run_kind: string
           source: string
+          structured_guidance_version_id: string | null
           structured_observations: Json
           verdict: Json
         }[]

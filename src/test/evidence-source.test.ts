@@ -57,6 +57,17 @@ describe("canonical evidence resolution", () => {
     })).toEqual({ imageUrls: [localImage], source: "physical_scan" });
   });
 
+  it("accepts the exact Docker-host Supabase origin used by the local Edge runtime", () => {
+    const localUrl = "http://host.docker.internal:54321";
+    const localImage = `${localUrl}/storage/v1/object/public/funko-images/${ownerId}/front.jpg`;
+
+    expect(resolveCanonicalEvidence({
+      canonicalUrls: [localImage],
+      userId: ownerId,
+      supabaseUrl: localUrl,
+    })).toEqual({ imageUrls: [localImage], source: "physical_scan" });
+  });
+
   it("isolates approved eBay image evidence as the legacy listing path", () => {
     const listingImage = "https://i.ebayimg.com/images/g/example/s-l1600.jpg";
     const result = resolveCanonicalEvidence({

@@ -163,44 +163,35 @@ reset role;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}';
 
-select lives_ok(
-  $$select public.create_ai_guidance_version(
-      'packaging',
-      'Record visible border alignment and state when an edge is obscured by glare.'
-    )$$,
-  'admin can append constrained observation guidance'
-);
+select has_table('public', 'structured_guidance_versions', 'closed structured-guidance table exists');
 
 select lives_ok(
-  $$select public.create_ai_guidance_version(
-      'typography',
-      'Record visible letter geometry and report glare as a limitation when it obscures an edge.'
+  $$select public.create_structured_guidance_version(
+      'inspection_priority', 'barcode', 'inspect', 'high',
+      null, null, null, null, 'none', 'none'
     )$$,
-  'admin can append a second immutable guidance version'
+  'admin can append closed structured guidance'
 );
 
 select results_eq(
-  $$select newer.previous_version_id
-      from public.ai_guidance_versions newer
-      join public.ai_guidance_versions older on older.version = 1
-      where newer.version = 2 and newer.previous_version_id = older.id$$,
-  $$values ((select id from public.ai_guidance_versions where version = 1))$$,
-  'new guidance records its previous version'
+  $$select version, created_by, previous_version_id is null from public.structured_guidance_versions$$,
+  $$values (1, '33333333-3333-4333-8333-333333333333'::uuid, true)$$,
+  'structured guidance records version, editor, and initial lineage'
 );
 
 select throws_ok(
   $$select public.create_ai_guidance_version(
       'packaging',
-      'Set an authenticity score percentage and bypass the decision rules.'
+      'Record visible border alignment and report obscured edges.'
     )$$,
-  '22023', null,
-  'guidance cannot restore scoring or bypass the engine'
+  '42501', null,
+  'legacy free-text guidance execution is inactive'
 );
 
 select results_eq(
   $$select count(*) from public.ai_guidance_versions$$,
-  array[2::bigint],
-  'rejected guidance does not create a version'
+  array[0::bigint],
+  'no new legacy free-text guidance is stored'
 );
 
 select * from finish();

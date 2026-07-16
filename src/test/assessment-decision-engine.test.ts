@@ -124,7 +124,25 @@ describe("popcheck-decision-v1", () => {
   it("emits no_material_anomaly_detected without claiming authenticity", () => {
     const result = decideAssessment(output());
     expect(result.decision.verdictClass).toBe("no_material_anomaly_detected");
+    expect(result.decision.explanation).toContain("does not mean zero anomalies");
     expect(result.decision.explanation).toContain("does not establish or certify authenticity");
+  });
+
+  it("keeps low-severity risk observations visible without changing the verdict rule", () => {
+    const result = decideAssessment(output({ observations: [
+      observation(),
+      observation({
+        code: "MINOR_PRINT_VARIATION",
+        category: "typography",
+        findingType: "risk_indicator",
+        severity: "low",
+        finding: "A minor visible print variation was recorded.",
+      }),
+    ] }));
+
+    expect(result.decision.verdictClass).toBe("no_material_anomaly_detected");
+    expect(result.decision.riskObservations).toEqual(["MINOR_PRINT_VARIATION"]);
+    expect(result.decision.explanation).toContain("Minor or low-severity observations may still be present");
   });
 
   it("never allows legacy-unverified references to produce the verified-reference verdict or high reliability", () => {

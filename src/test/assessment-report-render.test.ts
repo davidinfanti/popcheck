@@ -9,7 +9,7 @@ const observations: StructuredObservation[] = Array.from({ length: 14 }, (_, ind
   category: index % 2 === 0 ? "packaging" : "typography",
   findingType: index % 5 === 0 ? "risk_indicator" : "supporting_consistency",
   observationStatus: "observed",
-  severity: index % 5 === 0 ? "medium" : "informational",
+  severity: index % 5 === 0 ? "low" : "informational",
   confidenceLevel: "medium",
   imageIndex: index % 6,
   visibleRegion: `submitted image region ${index + 1}`,
@@ -48,13 +48,13 @@ const base: AssessmentReportData = {
     referenceCoverage: "none",
     visualConsistency: "mixed",
     codeConsistency: "not_assessable",
-    counterfeitIndicatorStrength: "moderate",
+    counterfeitIndicatorStrength: "low",
     assessmentReliability: "low",
   },
   decision: {
-    verdictClass: "elevated_counterfeit_risk",
-    userFacingTitle: "Elevated counterfeit risk",
-    explanation: "Visible, traceable inconsistencies require additional evidence or expert review.",
+    verdictClass: "no_material_anomaly_detected",
+    userFacingTitle: "No material anomaly detected",
+    explanation: "No material anomaly was detected in the visible evidence. Minor or low-severity observations may still be present and are listed below; this does not mean zero anomalies and does not establish or certify authenticity.",
     supportingObservations: ["PACKAGING_PRINT"],
     riskObservations: ["TYPOGRAPHY_GEOMETRY"],
     limitations: [
@@ -68,7 +68,7 @@ const base: AssessmentReportData = {
 };
 
 describe("Phase 1B assessment report rendering", () => {
-  it("renders physical and listing reports with disclosures and page footers", async () => {
+  it("renders physical and listing reports with low-severity observations, disclosures, and page footers", async () => {
     const physical = await buildAssessmentReportPDF(base);
     const listing = await buildAssessmentReportPDF({ ...base, analysisSource: "listing_legacy" });
 

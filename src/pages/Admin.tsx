@@ -21,6 +21,14 @@ import { Slider } from "@/components/ui/slider";
 import { format } from "date-fns";
 import { enUS } from "date-fns/locale";
 import { cn } from "@/lib/utils";
+import {
+  GUIDANCE_ACTIONS,
+  GUIDANCE_NOTE_TEMPLATES,
+  GUIDANCE_PRIORITIES,
+  GUIDANCE_REFERENCE_REQUIREMENTS,
+  GUIDANCE_TYPES,
+  INSPECTION_AREAS,
+} from "@/lib/assessment/guidance";
 
 type ScanStatusFilter = "all" | "completed" | "pending" | "attention";
 const SCAN_STATUS_TABS: { key: ScanStatusFilter; label: string; icon: any; color: string }[] = [
@@ -114,6 +122,13 @@ type Tab = "feed" | "flagged" | "rules" | "references" | "users" | "settings";
 
 const PART_TYPES = ["Front", "Back", "Bottom", "Logo_Detail", "Left_Side", "Right_Side", "Sticker", "Macro", "Other"];
 
+function releaseYearsFromRange(value: unknown): [string, string] {
+  if (typeof value !== "string") return ["", ""];
+  const match = value.match(/^\[(\d{4}),(\d{4})\)$/);
+  if (!match) return ["", ""];
+  return [match[1], String(Number(match[2]) - 1)];
+}
+
 export default function Admin() {
   const { user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
@@ -149,8 +164,16 @@ export default function Admin() {
   const [usersList, setUsersList] = useState<UserWithScans[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
 
-  const [systemInstructions, setSystemInstructions] = useState("");
-  const [guidanceCategory, setGuidanceCategory] = useState("evidence_quality");
+  const [guidanceType, setGuidanceType] = useState("inspection_priority");
+  const [inspectionArea, setInspectionArea] = useState("front_box");
+  const [guidanceAction, setGuidanceAction] = useState("inspect");
+  const [guidancePriority, setGuidancePriority] = useState("medium");
+  const [referenceRequirement, setReferenceRequirement] = useState("none");
+  const [structuredNote, setStructuredNote] = useState("none");
+  const [applicableProductId, setApplicableProductId] = useState("");
+  const [applicableVariantId, setApplicableVariantId] = useState("");
+  const [releaseYearFrom, setReleaseYearFrom] = useState("");
+  const [releaseYearTo, setReleaseYearTo] = useState("");
   const [guidanceVersion, setGuidanceVersion] = useState<number | null>(null);
   const [guidanceMetadata, setGuidanceMetadata] = useState<GuidanceMetadata | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
@@ -227,11 +250,20 @@ export default function Admin() {
 
   useEffect(() => {
     if (!isAdmin) return;
-    supabase.from("ai_guidance_versions").select("*").order("version", { ascending: false }).limit(1).maybeSingle()
+    supabase.from("structured_guidance_versions").select("*").order("version", { ascending: false }).limit(1).maybeSingle()
       .then(({ data }) => {
         if (!data) return;
-        setSystemInstructions(data.guidance);
-        setGuidanceCategory(data.category);
+        setGuidanceType(data.guidance_type);
+        setInspectionArea(data.inspection_area);
+        setGuidanceAction(data.action);
+        setGuidancePriority(data.priority);
+        setReferenceRequirement(data.reference_requirement);
+        setStructuredNote(data.structured_note);
+        setApplicableProductId(data.applicable_product_id || "");
+        setApplicableVariantId(data.applicable_variant_id || "");
+        const [releaseFrom, releaseTo] = releaseYearsFromRange(data.applicable_release_range);
+        setReleaseYearFrom(releaseFrom);
+        setReleaseYearTo(releaseTo);
         setGuidanceVersion(data.version);
         setGuidanceMetadata({
           createdAt: data.created_at,
@@ -243,9 +275,17 @@ export default function Admin() {
 
   const saveSettings = async () => {
     setSavingSettings(true);
-    const { data, error } = await supabase.rpc("create_ai_guidance_version", {
-      p_category: guidanceCategory,
-      p_guidance: systemInstructions,
+    const { data, error } = await supabase.rpc("create_structured_guidance_version", {
+      p_guidance_type: guidanceType,
+      p_inspection_area: inspectionArea,
+      p_action: guidanceAction,
+      p_priority: guidancePriority,
+      p_applicable_product_id: applicableProductId || null,
+      p_applicable_variant_id: applicableVariantId || null,
+      p_release_year_from: releaseYearFrom ? Number(releaseYearFrom) : null,
+      p_release_year_to: releaseYearTo ? Number(releaseYearTo) : null,
+      p_reference_requirement: referenceRequirement,
+      p_structured_note: structuredNote,
     });
     setSavingSettings(false);
     if (error) { toast.error(error.message || "Guidance was rejected"); return; }
@@ -1004,8 +1044,8 @@ export default function Admin() {
             </h2>
             <Card className="border-border/50">
               <CardHeader>
-                <CardTitle className="text-sm font-mono">Constrained forensic guidance {guidanceVersion ? `(current version ${guidanceVersion})` : ""}</CardTitle>
-                <p className="text-xs text-muted-foreground">Guidance can refine visible observation checks only. It cannot change the output schema, decision engine, verdict classes, uncertainty handling, or restore numerical scoring. Every save appends a new immutable version with editor and timestamp.</p>
+                <CardTitle className="text-sm font-mono">Closed structured guidance {guidanceVersion ? `(current version ${guidanceVersion})` : ""}</CardTitle>
+                <p className="text-xs text-muted-foreground">Only predefined inspection fields and note templates are executable. Free-text guidance is inactive legacy data. Guidance can change inspection coverage only; it cannot create a finding, select a verdict, alter uncertainty, or restore numerical scoring.</p>
                 {guidanceMetadata && (
                   <p className="text-[11px] font-mono text-muted-foreground">
                     Created {new Date(guidanceMetadata.createdAt).toLocaleString()} by {guidanceMetadata.createdBy.slice(0, 8)}... | Previous version: {guidanceMetadata.previousVersionId ? guidanceMetadata.previousVersionId.slice(0, 8) : "none"}
@@ -1013,17 +1053,21 @@ export default function Admin() {
                 )}
               </CardHeader>
               <CardContent className="space-y-4">
-                <Select value={guidanceCategory} onValueChange={setGuidanceCategory}>
-                  <SelectTrigger><SelectValue placeholder="Observation category" /></SelectTrigger>
-                  <SelectContent>
-                    {[
-                      "evidence_quality", "identity", "reference", "packaging", "typography",
-                      "code", "figure", "sticker", "listing",
-                    ].map((category) => <SelectItem key={category} value={category}>{category.replaceAll("_", " ")}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <Textarea value={systemInstructions} onChange={(e) => setSystemInstructions(e.target.value)}
-                  placeholder="Describe a factual, visible element to inspect and how to report uncertainty." rows={8} className="font-mono text-xs bg-secondary/20" />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <GuidanceSelect label="Guidance type" value={guidanceType} onChange={setGuidanceType} values={GUIDANCE_TYPES} />
+                  <GuidanceSelect label="Inspection area" value={inspectionArea} onChange={setInspectionArea} values={INSPECTION_AREAS} />
+                  <GuidanceSelect label="Action" value={guidanceAction} onChange={setGuidanceAction} values={GUIDANCE_ACTIONS} />
+                  <GuidanceSelect label="Priority" value={guidancePriority} onChange={setGuidancePriority} values={GUIDANCE_PRIORITIES} />
+                  <GuidanceSelect label="Reference requirement" value={referenceRequirement} onChange={setReferenceRequirement} values={GUIDANCE_REFERENCE_REQUIREMENTS} />
+                  <GuidanceSelect label="Controlled note template" value={structuredNote} onChange={setStructuredNote} values={GUIDANCE_NOTE_TEMPLATES} />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Input value={applicableProductId} onChange={(event) => setApplicableProductId(event.target.value)} placeholder="Optional product UUID" />
+                  <Input value={applicableVariantId} onChange={(event) => setApplicableVariantId(event.target.value)} placeholder="Optional variant UUID" />
+                  <Input type="number" min={1900} max={2100} value={releaseYearFrom} onChange={(event) => setReleaseYearFrom(event.target.value)} placeholder="Optional release year from" />
+                  <Input type="number" min={1900} max={2100} value={releaseYearTo} onChange={(event) => setReleaseYearTo(event.target.value)} placeholder="Optional release year to" />
+                </div>
+                <p className="text-[11px] text-muted-foreground">Release-specific guidance requires a product, variant, or release range. Comparison guidance requires a verified or legacy reference setting. No prose is sent to the model.</p>
                 <Button onClick={saveSettings} disabled={savingSettings}>
                   {savingSettings ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Settings className="w-4 h-4 mr-2" />}
                   Append guidance version
@@ -1033,6 +1077,25 @@ export default function Admin() {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+function GuidanceSelect({ label, value, onChange, values }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  values: readonly string[];
+}) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">{label}</p>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {values.map((option) => <SelectItem key={option} value={option}>{option.replaceAll("_", " ")}</SelectItem>)}
+        </SelectContent>
+      </Select>
     </div>
   );
 }

@@ -61,6 +61,13 @@ describe("Phase 1B report and history behavior", () => {
     expect(pdf).toContain("data.decision.limitations");
   });
 
+  it("keeps every observed risk indicator visible in UI and PDF regardless of low severity", () => {
+    expect(results).toContain('item.findingType === "risk_indicator" && item.observationStatus === "observed"');
+    expect(results).toContain("item.severity");
+    expect(pdf).toContain('item.findingType === "risk_indicator" && item.observationStatus === "observed"');
+    expect(pdf).toContain("(${item.severity})");
+  });
+
   it("re-analysis appends to the same submission and never inserts a replacement authentication", () => {
     const reanalysis = results.slice(results.indexOf("function ReanalyzeButton"));
     expect(reanalysis).toContain("authenticationId");
@@ -75,18 +82,30 @@ describe("Phase 1B report and history behavior", () => {
 
 describe("Phase 1B admin-setting protections", () => {
   const admin = file("src/pages/Admin.tsx");
-  const migration = file("supabase/migrations/20260716120000_phase_1b_verdict_integrity.sql");
+  const phase1bMigration = file("supabase/migrations/20260716120000_phase_1b_verdict_integrity.sql");
+  const migration = file("supabase/migrations/20260716170000_phase_1b1_guidance_atomicity.sql");
 
-  it("uses immutable constrained guidance instead of the raw system override", () => {
-    expect(admin).toContain('rpc("create_ai_guidance_version"');
+  it("uses immutable closed structured guidance instead of free-text execution", () => {
+    expect(admin).toContain('rpc("create_structured_guidance_version"');
+    expect(admin).not.toContain('rpc("create_ai_guidance_version"');
     expect(admin).not.toContain('.from("ai_settings").update');
-    expect(migration).toContain("ai_guidance_versions_are_append_only");
-    expect(migration).toContain("decision, scoring, certification, fabrication, and bypass instructions are prohibited");
+    expect(migration).toContain("structured_guidance_versions_are_append_only");
+    expect(migration).toContain("REVOKE EXECUTE ON FUNCTION public.create_ai_guidance_version");
+    expect(phase1bMigration).toContain("ai_guidance_versions_are_append_only");
   });
 
   it("records the influencing guidance version on an immutable run", () => {
     const analyze = file("supabase/functions/analyze-funko/index.ts");
-    expect(analyze).toContain("guidance_version_id: guidance?.id || null");
-    expect(migration).toContain("assessment_runs_are_append_only");
+    expect(analyze).toContain("p_structured_guidance_version_id: guidance?.id || null");
+    expect(analyze).not.toContain('.from("ai_guidance_versions")');
+    expect(phase1bMigration).toContain("assessment_runs_are_append_only");
+  });
+
+  it("uses one service-role-only RPC for run insertion and snapshot completion", () => {
+    const analyze = file("supabase/functions/analyze-funko/index.ts");
+    expect(analyze).toContain('"complete_phase_1b_assessment"');
+    expect(analyze).not.toContain('.from("assessment_runs").insert');
+    expect(migration).toContain("GRANT EXECUTE ON FUNCTION public.complete_phase_1b_assessment");
+    expect(migration).toContain("TO service_role");
   });
 });
