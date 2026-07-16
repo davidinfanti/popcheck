@@ -147,7 +147,7 @@ const verdictCopy: Record<VerdictClass, { title: string; explanation: string }> 
   },
   no_material_anomaly_detected: {
     title: "No material anomaly detected",
-    explanation: "No material anomaly was detected in the visible evidence. This does not establish or certify authenticity.",
+    explanation: "No material anomaly was detected in the visible evidence. Minor or low-severity observations may still be present and are listed below; this does not mean zero anomalies and does not establish or certify authenticity.",
   },
   inconclusive: {
     title: "Inconclusive assessment",

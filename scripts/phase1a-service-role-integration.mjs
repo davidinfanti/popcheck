@@ -112,7 +112,11 @@ assert.equal(wrongOwner.response.status, 403, "ownership check did not reject an
 const completed = await invoke(owner, submission.id, {
   imageUrls: ["https://attacker.example/forged.jpg"],
 });
-assert.equal(completed.response.status, 200, `analysis invocation failed with ${completed.response.status}`);
+assert.equal(
+  completed.response.status,
+  200,
+  `analysis invocation failed with ${completed.response.status}: ${JSON.stringify(completed.data)}`,
+);
 assert.equal(completed.data.success, true);
 
 const completedRow = await serviceRead(submission.id);
@@ -131,7 +135,9 @@ assert.equal(completedRow.details.audit.decisionEngineVersion, "popcheck-decisio
 const firstRuns = await serviceReadRuns(submission.id);
 assert.equal(firstRuns.length, 1);
 assert.equal(firstRuns[0].id, completed.data.assessmentRunId);
+assert.equal(completedRow.details.assessmentRunId, firstRuns[0].id, "snapshot and authoritative run must commit together");
 assert.equal(firstRuns[0].run_kind, "phase_1b");
+assert(firstRuns[0].completion_token, "atomic completion must store an idempotency token");
 assert.equal(firstRuns[0].prompt_version, "popcheck-observation-v1");
 assert.equal(firstRuns[0].decision_engine_version, "popcheck-decision-v1");
 assert.equal(firstRuns[0].verdict.verdictClass, "no_material_anomaly_detected");
@@ -144,6 +150,7 @@ const repeatedRuns = await serviceReadRuns(submission.id);
 assert.equal(repeatedRuns.length, 2, "re-analysis must append a second run");
 assert.equal(repeatedRuns[0].id, firstRuns[0].id, "the earlier run must remain unchanged");
 assert.notEqual(repeatedRuns[1].id, repeatedRuns[0].id);
+assert.equal(completedRow.details.audit.structuredGuidanceVersionId, null);
 
 async function assertControlledProviderFailure(marker, expectedCode) {
   const failureSubmission = await insertSubmission(owner, [
@@ -189,6 +196,8 @@ console.log(JSON.stringify({
   canonicalEvidenceLoaded: true,
   requestBodyImageMismatchIgnored: true,
   serviceRoleCompletedAssessment: true,
+  atomicRunAndSnapshotCommitted: true,
+  completionTokenStored: true,
   auditMetadataStored: true,
   legacyScoreNotWritten: true,
   appendOnlyHistoryPreserved: true,

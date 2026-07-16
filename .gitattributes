@@ -1,0 +1,8 @@
+# Source exports must never contain environment files. The committed placeholder
+# template remains available in the repository but is deliberately omitted from archives.
+.env export-ignore
+.env.* export-ignore
+**/.env export-ignore
+**/.env.* export-ignore
+supabase/.branches/** export-ignore
+supabase/.temp/** export-ignore

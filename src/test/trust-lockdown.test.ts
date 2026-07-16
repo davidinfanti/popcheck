@@ -35,10 +35,10 @@ describe("verdict-cache regression", () => {
 
   it("cannot copy another user's details into a new submission", () => {
     const source = projectFile("supabase/functions/analyze-funko/index.ts");
-    const completionBlock = source.slice(source.indexOf('.from("assessment_runs")'));
+    const completionBlock = source.slice(source.indexOf('"complete_phase_1b_assessment"'));
 
-    expect(completionBlock).toContain("structured_observations: assessment.observations");
-    expect(completionBlock).toContain("verdict: assessment.decision");
+    expect(completionBlock).toContain("p_structured_observations: assessment.observations");
+    expect(completionBlock).toContain("p_verdict: assessment.decision");
     expect(completionBlock).not.toMatch(/details:\s*(cached|ownedRow|previous)/);
     expect(completionBlock).not.toContain("cached_from_id: cached");
   });

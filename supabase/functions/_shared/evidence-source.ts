@@ -76,7 +76,7 @@ export function resolveCanonicalEvidence(input: {
   const parsedSupabaseUrl = new URL(supabaseUrl);
   const supabaseOrigin = parsedSupabaseUrl.origin;
   const localSupabase = parsedSupabaseUrl.protocol === "http:" &&
-    ["127.0.0.1", "localhost", "host.lima.internal"].includes(parsedSupabaseUrl.hostname);
+    ["127.0.0.1", "localhost", "host.lima.internal", "host.docker.internal"].includes(parsedSupabaseUrl.hostname);
   let hasLegacyListingImage = false;
 
   const imageUrls = canonicalUrls.map((rawUrl) => {
