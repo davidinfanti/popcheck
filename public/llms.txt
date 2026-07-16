@@ -1,0 +1,34 @@
+# PopCheck AI
+
+> AI-powered Funko Pop! authenticity verification platform.
+
+PopCheck AI uses forensic computer vision to detect counterfeit Funko Pop! vinyl figures. Users upload 6 photos of their Pop (front, sides, back, bottom barcode, and a macro of the POP! logo), and the system performs a V-STAMP analysis across four categories: Typography & Logo, Art & Border, Packaging & Serial, and Vision & Mold.
+
+## Features
+
+- **V-STAMP Analysis**: Proprietary forensic scoring protocol (0–100) evaluating typography, borders, packaging, and mold quality.
+- **Anomaly Detection**: AI highlights specific regions of concern with severity-based overlays (critical, warning, info).
+- **Reference Comparison**: Side-by-side slider comparing user photos against verified reference images.
+- **PDF Certificate of Authenticity**: Downloadable certificate with QR code verification, product metadata, and V-STAMP score.
+- **Era Detection**: Identifies production era and factory codes for timeline validation.
+- **Barcode Verification**: Cross-references barcodes against known authentic databases.
+- **Expert Training Feedback**: Users can flag potential AI errors to improve the model.
+
+## How It Works
+
+1. Upload 6 photos of your Funko Pop! (front box, left side, right side, back, bottom barcode, macro POP! logo).
+2. The AI performs a forensic V-STAMP analysis across typography, border quality, serial/packaging data, and vision/mold details.
+3. A detailed report is generated with an authenticity score, per-image notes, anomaly highlights, and investigative summary.
+4. Download a PDF Certificate of Authenticity with a QR code linking back to the full report.
+
+## URLs
+
+- Homepage: https://pop-guard-ai.lovable.app
+- Report (public): https://pop-guard-ai.lovable.app/results/{id}
+
+## Tech Stack
+
+- Frontend: React, TypeScript, Tailwind CSS, Vite
+- Backend: Lovable Cloud (Supabase)
+- AI: Gemini vision model for forensic image analysis
+- PDF Generation: jsPDF with QR code via qrcode library
