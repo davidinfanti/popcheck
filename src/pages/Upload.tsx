@@ -139,7 +139,7 @@ export default function UploadPage() {
       if (insertError) throw insertError;
 
       const { error: fnError } = await supabase.functions.invoke("analyze-funko", {
-        body: { authenticationId: authRecord.id, imageUrls, photoCount: imageUrls.length },
+        body: { authenticationId: authRecord.id },
       });
 
       if (fnError) throw fnError;

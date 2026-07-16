@@ -619,13 +619,7 @@ function ReanalyzeButton({ auth }: { auth: any }) {
       if (insertError) throw insertError;
 
       const { error: fnError } = await supabase.functions.invoke("analyze-funko", {
-        body: {
-          authenticationId: newAuth.id,
-          imageUrls: auth.image_urls,
-          photoCount: auth.image_urls.length,
-          popName: auth.pop_name,
-          popNumber: auth.pop_number,
-        },
+        body: { authenticationId: newAuth.id },
       });
       if (fnError) throw fnError;
       toast.success("Re-analysis complete!");

@@ -1,7 +1,7 @@
 project_id = "utfhwabulcbkzgmuilvz"
 
 [functions.analyze-funko]
-verify_jwt = false
+verify_jwt = true
 
 [functions.scrape-listing]
-verify_jwt = false
+verify_jwt = true

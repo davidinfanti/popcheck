@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { parseApprovedEbayUrl } from "../_shared/ebay-url.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -44,23 +45,16 @@ serve(async (req) => {
     }
 
     // Server-side eBay-only enforcement (client UI already restricts this)
-    let parsedUrl: URL;
-    try {
-      parsedUrl = new URL(url);
-    } catch {
-      return new Response(JSON.stringify({ error: "Invalid URL" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-    if (!/(^|\.)ebay\./i.test(parsedUrl.hostname)) {
-      return new Response(JSON.stringify({ error: "Only eBay URLs are supported" }), {
+    const parsedUrl = parseApprovedEbayUrl(url);
+    if (!parsedUrl) {
+      return new Response(JSON.stringify({ error: "Only approved HTTPS eBay URLs without credentials are supported" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    console.log("Scraping listing:", url);
+    const approvedUrl = parsedUrl.toString();
+    console.log("Scraping listing:", approvedUrl);
 
     // Helper: fetch a URL via Jina proxy (mobile eBay works, desktop is blocked by Akamai)
     const fetchViaJina = async (targetUrl: string): Promise<string> => {
@@ -112,14 +106,14 @@ serve(async (req) => {
     };
 
     let html = "";
-    let resolvedUrl = url;
+    let resolvedUrl = approvedUrl;
     let fetchStrategy = "";
     const strategies = Deno.env.get("FIRECRAWL_API_KEY")
       ? [
-          { name: "Firecrawl browser", fetcher: () => fetchViaFirecrawl(url) },
-          { name: "Jina mobile", fetcher: () => fetchViaJina(url) },
+          { name: "Firecrawl browser", fetcher: () => fetchViaFirecrawl(approvedUrl) },
+          { name: "Jina mobile", fetcher: () => fetchViaJina(approvedUrl) },
         ]
-      : [{ name: "Jina mobile", fetcher: () => fetchViaJina(url) }];
+      : [{ name: "Jina mobile", fetcher: () => fetchViaJina(approvedUrl) }];
 
     for (const strategy of strategies) {
       try {
@@ -147,10 +141,10 @@ serve(async (req) => {
     // Find the first individual /itm/ listing (different from current) and fetch it instead,
     // because product pages don't expose the seller's full gallery.
     const itmMatches = Array.from(html.matchAll(/\/itm\/(\d{10,})/g)).map((m) => m[1]);
-    const currentItmMatch = url.match(/\/itm\/(\d{10,})/);
+    const currentItmMatch = approvedUrl.match(/\/itm\/(\d{10,})/);
     const currentItm = currentItmMatch ? currentItmMatch[1] : null;
     const otherItm = itmMatches.find((id) => id !== currentItm);
-    const isProductPageRequest = /\/p\/\d+/i.test(url) || !currentItm;
+    const isProductPageRequest = /\/p\/\d+/i.test(approvedUrl) || !currentItm;
 
     // Only product/aggregator URLs may be resolved to a seller /itm/.
     // For a direct /itm/ URL, never jump to another item: that caused unrelated photos
@@ -200,7 +194,7 @@ serve(async (req) => {
     };
 
     let match;
-    const isEbayUrl = /ebay\./i.test(url);
+    const isEbayUrl = true;
     const xPhotosMatch = html.match(
       /<div[^>]+class="[^"]*\bx-photos\b[^"]*"[\s\S]*?(?=<div[^>]+class="[^"]*\b(?:x-prp-main-container_col-right|x-item-title|x-sellercard|x-item-condition)\b|<\/main>)/i,
     );

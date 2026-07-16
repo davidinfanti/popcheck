@@ -1,5 +1,11 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { EvidenceValidationError, resolveCanonicalEvidence } from "../_shared/evidence-source.ts";
+import {
+  ANALYSIS_CONFIG_VERSION,
+  ANALYSIS_MODEL,
+  dispatchIndependentAnalysis,
+} from "../_shared/independent-analysis.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -36,12 +42,19 @@ serve(async (req) => {
     }
     const callerUserId = claimsData.claims.sub as string;
 
-    const { authenticationId, imageUrls, popName, popNumber, photoCount } = await req.json();
+    const requestBody = await req.json();
+    const authenticationId = requestBody?.authenticationId;
+    if (typeof authenticationId !== "string" || !authenticationId) {
+      return new Response(JSON.stringify({ error: "authenticationId is required" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     // Ownership check before any expensive AI work or DB write
     const { data: ownedRow } = await userClient
       .from("authentications")
-      .select("id")
+      .select("id, user_id, image_urls, pop_name, pop_number")
       .eq("id", authenticationId)
       .eq("user_id", callerUserId)
       .maybeSingle();
@@ -58,111 +71,20 @@ serve(async (req) => {
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const totalPhotos = photoCount || imageUrls.length;
+    // The request-body image array is intentionally ignored. Only the owned row's
+    // canonical evidence can reach the model.
+    const canonicalEvidence = resolveCanonicalEvidence({
+      canonicalUrls: ownedRow.image_urls,
+      requestedUrls: Array.isArray(requestBody?.imageUrls) ? requestBody.imageUrls : null,
+      userId: callerUserId,
+      supabaseUrl,
+    });
+    const imageUrls = canonicalEvidence.imageUrls;
+    const analysisSource = canonicalEvidence.source;
+    const popName = ownedRow.pop_name;
+    const popNumber = ownedRow.pop_number;
+    const totalPhotos = imageUrls.length;
     const cleanPopNumber = popNumber?.replace("#", "") || "";
-
-    // ════════════════════════════════════════════════════════════════
-    //  CACHE LOOKUP PRE-PASS (V2.0)
-    //  Quick low-cost OCR to extract pop_number + factory_code, then
-    //  check if an identical pre-validated scan exists in the last 90 days.
-    // ════════════════════════════════════════════════════════════════
-    let cacheKey: string | null = null;
-    try {
-      const ocrResp = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "google/gemini-3-flash-preview",
-          messages: [
-            {
-              role: "system",
-              content: "You are an OCR engine for Funko Pop boxes. Extract ONLY the Pop number (digits after #) and the factory code (e.g. FAC, JJL, DRM) printed on the bottom of the box. Return -1 if not visible. Do not analyze authenticity.",
-            },
-            {
-              role: "user",
-              content: [
-                { type: "text", text: "Extract pop_number and factory_code." },
-                ...imageUrls.slice(0, 2).map((url: string) => ({ type: "image_url", image_url: { url } })),
-              ],
-            },
-          ],
-          tools: [{
-            type: "function",
-            function: {
-              name: "extract_box_ids",
-              parameters: {
-                type: "object",
-                properties: {
-                  pop_number: { type: "string", description: "Digits only, or -1" },
-                  factory_code: { type: "string", description: "Factory code (FAC/JJL/DRM/etc) or -1" },
-                },
-                required: ["pop_number", "factory_code"],
-                additionalProperties: false,
-              },
-            },
-          }],
-          tool_choice: { type: "function", function: { name: "extract_box_ids" } },
-        }),
-      });
-
-      if (ocrResp.ok) {
-        const ocrJson = await ocrResp.json();
-        const ocrArgs = ocrJson.choices?.[0]?.message?.tool_calls?.[0]?.function?.arguments;
-        if (ocrArgs) {
-          const ocr = JSON.parse(ocrArgs);
-          const num = (ocr.pop_number || "").toString().replace(/[^\d]/g, "");
-          const fac = (ocr.factory_code || "").toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
-          if (num && fac && num !== "-1" && fac !== "-1" && num.length > 0 && fac.length > 0) {
-            cacheKey = `${num}-${fac}`;
-            console.log("[CACHE] computed cache_key:", cacheKey);
-
-            // Lookup recent pre-validated match (score>=80, last 90 days)
-            const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-            const { data: cached } = await supabase
-              .from("authentications")
-              .select("id, score, pop_name, pop_number, details")
-              .eq("cache_key", cacheKey)
-              .eq("status", "completed")
-              .gte("score", 80)
-              .gte("created_at", since)
-              .neq("id", authenticationId)
-              .order("created_at", { ascending: false })
-              .limit(1)
-              .maybeSingle();
-
-            if (cached) {
-              console.log("[CACHE HIT] reusing analysis", cached.id, "score", cached.score);
-              const reusedDetails = {
-                ...(cached.details as any),
-                cacheHit: true,
-                cachedFromId: cached.id,
-                cacheNote: `Instant verdict reused from a previously validated scan with identical Pop #${num} and factory code ${fac}.`,
-                photoCount: totalPhotos,
-              };
-              await supabase
-                .from("authentications")
-                .update({
-                  score: cached.score,
-                  pop_name: cached.pop_name,
-                  pop_number: cached.pop_number,
-                  details: reusedDetails,
-                  status: "completed",
-                  cache_key: cacheKey,
-                  cached_from_id: cached.id,
-                })
-                .eq("id", authenticationId);
-
-              return new Response(
-                JSON.stringify({ success: true, score: cached.score, cached: true }),
-                { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-              );
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.warn("[CACHE] pre-pass failed, continuing with full analysis:", e);
-    }
 
     // Load all context in parallel
     const [settingsRes, negRefsRes, rulesRes, fakeRefsRes, origRefsRes, refPopsRes] = await Promise.all([
@@ -191,9 +113,9 @@ serve(async (req) => {
     let negativeContext = "";
     const negRefs = negRefsRes.data;
     if (negRefs && negRefs.length > 0) {
-      negativeContext = `\n=== NEGATIVE REFERENCE LIBRARY (Known Fakes) ===\n` +
+      negativeContext = `\n=== LEGACY / UNVERIFIED NEGATIVE REFERENCE LIBRARY ===\n` +
         negRefs.map(r => `- ${r.pop_name || "Unknown"} #${r.pop_number || "?"}: ${r.fake_trait} — ${r.description || ""}`).join("\n") +
-        `\nUse these known fake patterns to inform your analysis. If the submitted Pop matches ANY of these traits, it is almost certainly counterfeit.\n`;
+        `\nThese records predate provenance hardening. Treat them as unverified context, disclose their use, and do not describe them as official.\n`;
     }
 
     // Expert forensic rules
@@ -207,13 +129,13 @@ serve(async (req) => {
 
     // Reference pop data
     let referenceContext = "";
-    let masterImageUrl: string | null = null;
+    let legacyReferenceImageUrl: string | null = null;
     const refs = refPopsRes.data;
     if (refs && refs.length > 0) {
       const ref = refs[0];
-      masterImageUrl = ref.official_image_url || null;
+      legacyReferenceImageUrl = ref.official_image_url || null;
       referenceContext = `
-REFERENCE DATA FOUND — This Pop exists in our database!
+LEGACY / UNVERIFIED REFERENCE DATA — provenance validation is pending.
 Name: ${ref.name} | Number: #${ref.number} | Category: ${ref.category}
 Production Code Prefix: ${ref.production_code_prefix || "N/A"}
 Official Barcode: ${ref.barcode_data || "N/A"}
@@ -223,25 +145,8 @@ Is Vaulted (high counterfeit risk): ${ref.is_vaulted ? "YES — extra scrutiny r
 `;
     }
 
-    // Auto-fetch master image if we have no original references and no official_image_url
     const origRefs = origRefsRes.data;
     const hasOrigRefs = origRefs && origRefs.length > 0;
-    if (!hasOrigRefs && !masterImageUrl && cleanPopNumber) {
-      try {
-        const searchQuery = `Funko Pop ${popName || ""} #${cleanPopNumber} official box`;
-        const scraperResp = await fetch("https://api.duckduckgo.com/?q=" + encodeURIComponent(searchQuery) + "&format=json&no_html=1&skip_disambig=1");
-        if (scraperResp.ok) {
-          const ddgData = await scraperResp.json();
-          const imgUrl = ddgData?.Image;
-          if (imgUrl && imgUrl.startsWith("http")) {
-            masterImageUrl = imgUrl;
-            console.log("Auto-fetched master image from DDG:", masterImageUrl);
-          }
-        }
-      } catch (e) {
-        console.warn("Master image auto-fetch failed, continuing without:", e);
-      }
-    }
 
     // Build image content — user photos + fake reference images for comparison
     const imageContents: any[] = imageUrls.map((url: string) => ({
@@ -249,18 +154,18 @@ Is Vaulted (high counterfeit risk): ${ref.is_vaulted ? "YES — extra scrutiny r
       image_url: { url },
     }));
 
-    // Append master image if available and no original references exist
-    let masterImageContext = "";
-    if (masterImageUrl && !hasOrigRefs) {
-      imageContents.push({ type: "image_url", image_url: { url: masterImageUrl } });
-      masterImageContext = `\n=== AUTO-FETCHED MASTER REFERENCE IMAGE ===
-A master/official reference image has been automatically retrieved and appended as the LAST image (index ${imageContents.length - 1}).
-Use this as the PRIMARY comparison standard. Compare the user's photos against this official image for:
+    // Admin-managed legacy image only. No web search is performed.
+    let legacyImageContext = "";
+    if (legacyReferenceImageUrl && !hasOrigRefs) {
+      imageContents.push({ type: "image_url", image_url: { url: legacyReferenceImageUrl } });
+      legacyImageContext = `\n=== LEGACY / UNVERIFIED ADMIN REFERENCE IMAGE ===
+An admin-managed image with unverified provenance is appended as the LAST image (index ${imageContents.length - 1}).
+It may provide context, but it is not official and must not be described as authoritative. Compare cautiously for:
 - Logo positioning and proportions
 - Color accuracy and saturation
 - Typography and font metrics
 - Overall layout and element placement
-This is NOT a user photo — it is the gold standard.\n`;
+This is not a user photo. Its provenance is pending validation.\n`;
     }
 
     // Append original + fake reference images for few-shot comparative analysis
@@ -271,14 +176,14 @@ This is NOT a user photo — it is the gold standard.\n`;
     if (hasOrigRefs || hasFakeRefs) {
       let refImageIndex = totalPhotos;
       
-      comparativeInstructions = `\n=== FEW-SHOT COMPARATIVE ANALYSIS MODE ===
+      comparativeInstructions = `\n=== LEGACY / UNVERIFIED COMPARATIVE ANALYSIS MODE ===
 The user uploaded ${totalPhotos} photo(s) (indices 0-${totalPhotos - 1}).
-Reference images for Pop #${cleanPopNumber} are appended AFTER the user's photos as FEW-SHOT EXAMPLES.\n`;
+Admin-managed reference images for Pop #${cleanPopNumber} are appended AFTER the user's photos. Their provenance has not yet been normalized or verified.\n`;
 
       // Add original reference images first
       if (hasOrigRefs) {
-        comparativeInstructions += `\n--- AUTHENTIC REFERENCE IMAGES (${origRefs.length}) ---
-These are CONFIRMED AUTHENTIC examples. Use them as the gold standard.\n`;
+        comparativeInstructions += `\n--- LEGACY ORIGINAL-LABELLED IMAGES (${origRefs.length}) ---
+These are admin-labelled examples with unverified provenance. Do not call them official or conclusive.\n`;
         origRefs.forEach((or: any, i: number) => {
           comparativeInstructions += `  Original ref #${i + 1} (image index ${refImageIndex + i}): Part="${or.part_type}" — ${or.expert_note || "Authentic reference"}\n`;
         });
@@ -290,8 +195,8 @@ These are CONFIRMED AUTHENTIC examples. Use them as the gold standard.\n`;
 
       // Add fake reference images
       if (hasFakeRefs) {
-        comparativeInstructions += `\n--- KNOWN FAKE REFERENCE IMAGES (${fakeRefs.length}) ---
-These are CONFIRMED COUNTERFEIT examples. If user's photos match these patterns, it's fake.\n`;
+        comparativeInstructions += `\n--- LEGACY COUNTERFEIT-LABELLED IMAGES (${fakeRefs.length}) ---
+These are admin-labelled examples with unverified provenance. Similarity is contextual evidence, not conclusive proof.\n`;
         fakeRefs.forEach((fr: any, i: number) => {
           comparativeInstructions += `  Fake ref #${i + 1} (image index ${refImageIndex + i}): Part="${fr.part_type}" — ${fr.detected_flaw || "No notes"}\n`;
         });
@@ -315,34 +220,32 @@ PIXEL-LEVEL DIFFERENTIAL ANALYSIS PROTOCOL:
 8. Include a "referenceConfidence" field in your analysis: percentage 0-100 indicating how confident the analysis is based on available reference data. Base: 50% (no refs), +10% per reference image (max 90%).\n`;
     }
 
-    const systemPrompt = buildSystemPrompt(totalPhotos, referenceContext, negativeContext, rulesContext, comparativeInstructions, masterImageContext, systemInstructionsOverride);
+    const legacyUnverifiedReferencesUsed = Boolean(
+      negRefs?.length || refs?.length || origRefs?.length || fakeRefs?.length || legacyReferenceImageUrl,
+    );
+
+    const systemPrompt = buildSystemPrompt(totalPhotos, referenceContext, negativeContext, rulesContext, comparativeInstructions, legacyImageContext, systemInstructionsOverride);
 
     const userContent = [
       {
         type: "text",
         text: `Analyze this Funko Pop for authenticity. ${totalPhotos} photo(s) provided.${popName ? ` Pop Name: ${popName}` : ""}${popNumber ? ` Pop Number: ${popNumber}` : ""}
-${hasOrigRefs ? `\n${origRefs.length} AUTHENTIC reference image(s) are appended as gold-standard examples.` : ""}${hasFakeRefs ? `\n${fakeRefs.length} KNOWN FAKE reference image(s) are appended for differential comparison.` : ""}${masterImageUrl && !hasOrigRefs ? `\nAn auto-fetched MASTER REFERENCE image is appended as the primary comparison standard.` : ""}
+${hasOrigRefs ? `\n${origRefs.length} legacy original-labelled image(s) are appended as unverified context.` : ""}${hasFakeRefs ? `\n${fakeRefs.length} legacy counterfeit-labelled image(s) are appended as unverified context.` : ""}${legacyReferenceImageUrl && !hasOrigRefs ? `\nAn admin-managed legacy reference image with unverified provenance is appended.` : ""}
 Provide thorough investigative notes. If fewer than 6 photos, score only what you can see and return -1 for categories you cannot evaluate.`,
       },
       ...imageContents,
     ];
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-3-flash-preview",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
-        ],
-        tools: [
-          {
-            type: "function",
-            function: {
+    const response = await dispatchIndependentAnalysis(fetch, LOVABLE_API_KEY, {
+      model: ANALYSIS_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
               name: "submit_vstamp_analysis",
               description: "Submit the V-STAMP 5.0 Global Blueprint 2026 forensic analysis. Use -1 for categories that cannot be evaluated.",
               parameters: {
@@ -424,11 +327,10 @@ Provide thorough investigative notes. If fewer than 6 photos, score only what yo
                 required: ["typographyScore", "borderScore", "barcodeScore", "colorScore", "barcodeMatch", "eraDetected", "factoryCode", "summary", "anomalies", "comparativeResult", "referenceConfidence", "anomalyRegions", "perImage", "verdictBand", "marketRiskLevel", "marketFlags", "stockPhotoDetected", "whiteBorderScore", "stampToBoxMatch", "paintJobScore", "copyrightStampPresent", "requestedShots", "seriesLine", "identifiedPopName", "identifiedPopNumber"],
                 additionalProperties: false,
               },
-            },
           },
-        ],
-        tool_choice: { type: "function", function: { name: "submit_vstamp_analysis" } },
-      }),
+        },
+      ],
+      tool_choice: { type: "function", function: { name: "submit_vstamp_analysis" } },
     });
 
     if (!response.ok) {
@@ -528,6 +430,7 @@ Provide thorough investigative notes. If fewer than 6 photos, score only what yo
     }
 
     finalScore = Math.max(0, Math.min(100, Math.round(finalScore)));
+    const analyzedAt = new Date().toISOString();
 
     const { error: updateError } = await supabase
       .from("authentications")
@@ -582,15 +485,24 @@ Provide thorough investigative notes. If fewer than 6 photos, score only what yo
           factoryCode: analysis.factoryCode,
           seriesLine: analysis.seriesLine || null,
           photoCount: totalPhotos,
+          audit: {
+            model: ANALYSIS_MODEL,
+            configurationVersion: ANALYSIS_CONFIG_VERSION,
+            analyzedAt,
+            legacyUnverifiedReferencesUsed,
+            analysisSource,
+          },
         },
         status: "completed",
-        cache_key: cacheKey || (() => {
-          const n = (analysis.identifiedPopNumber || cleanPopNumber || "").toString().replace(/[^\d]/g, "");
-          const f = (analysis.factoryCode || "").toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
-          return n && f ? `${n}-${f}` : null;
-        })(),
+        analysis_model: ANALYSIS_MODEL,
+        analysis_config_version: ANALYSIS_CONFIG_VERSION,
+        analyzed_at: analyzedAt,
+        legacy_unverified_references_used: legacyUnverifiedReferencesUsed,
+        analysis_source: analysisSource,
+        cached_from_id: null,
       })
-      .eq("id", authenticationId);
+      .eq("id", authenticationId)
+      .eq("user_id", callerUserId);
 
     if (updateError) throw updateError;
 
@@ -599,6 +511,12 @@ Provide thorough investigative notes. If fewer than 6 photos, score only what yo
     });
   } catch (e) {
     console.error("analyze-funko error:", e);
+    if (e instanceof EvidenceValidationError) {
+      return new Response(
+        JSON.stringify({ error: e.code, message: e.message }),
+        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
     return new Response(
       JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -606,13 +524,13 @@ Provide thorough investigative notes. If fewer than 6 photos, score only what yo
   }
 });
 
-function buildSystemPrompt(totalPhotos: number, referenceContext: string, negativeContext: string, rulesContext: string, comparativeInstructions: string, masterImageContext: string, systemInstructionsOverride: string): string {
+function buildSystemPrompt(totalPhotos: number, referenceContext: string, negativeContext: string, rulesContext: string, comparativeInstructions: string, legacyImageContext: string, systemInstructionsOverride: string): string {
   return `You are a LEAD FORENSIC PATHOLOGIST for Funko Pop Authentication (PopCheck Engine). Your mission is ZERO-TOLERANCE detection of counterfeits using the Global Blueprint 2026.
 
 You will receive ${totalPhotos} images (may be fewer than 6 if the user didn't provide all angles).
 
 ${referenceContext}
-${masterImageContext}
+${legacyImageContext}
 ${negativeContext}
 ${rulesContext}
 ${comparativeInstructions}
@@ -717,7 +635,7 @@ These rules take ABSOLUTE PRECEDENCE over any zero-tolerance trigger below.
 
 1. **Halftone vs. Geometry**: If the POP! logo appears to have halftone dots that are SLIGHTLY UNCLEAR
    due to reflections, digital noise, or compression artifacts, but the font shape and position are
-   GEOMETRICALLY IDENTICAL to the master reference, reduce the halftone penalty (don't zero-tolerance).
+   GEOMETRICALLY IDENTICAL to an available comparison image, reduce the halftone penalty (don't zero-tolerance).
    HOWEVER: If the POP! logo yellow is COMPLETELY FLAT/SOLID (no dots, no gradient, uniform color),
    this is a CRITICAL FAKE INDICATOR regardless of geometry. A flat solid-color POP! logo = DIGITAL PRINT.
    In this case, cap Typography at MAX 30 and flag as "Logo POP! piatto - stampa digitale".

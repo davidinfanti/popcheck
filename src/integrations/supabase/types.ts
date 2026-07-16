@@ -40,12 +40,17 @@ export type Database = {
       }
       authentications: {
         Row: {
+          analysis_config_version: string | null
+          analysis_model: string | null
+          analysis_source: string | null
+          analyzed_at: string | null
           cache_key: string | null
           cached_from_id: string | null
           created_at: string
           details: Json | null
           id: string
           image_urls: string[] | null
+          legacy_unverified_references_used: boolean | null
           pop_name: string | null
           pop_number: string | null
           score: number | null
@@ -55,12 +60,17 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          analysis_config_version?: string | null
+          analysis_model?: string | null
+          analysis_source?: string | null
+          analyzed_at?: string | null
           cache_key?: string | null
           cached_from_id?: string | null
           created_at?: string
           details?: Json | null
           id?: string
           image_urls?: string[] | null
+          legacy_unverified_references_used?: boolean | null
           pop_name?: string | null
           pop_number?: string | null
           score?: number | null
@@ -70,12 +80,17 @@ export type Database = {
           user_id: string
         }
         Update: {
+          analysis_config_version?: string | null
+          analysis_model?: string | null
+          analysis_source?: string | null
+          analyzed_at?: string | null
           cache_key?: string | null
           cached_from_id?: string | null
           created_at?: string
           details?: Json | null
           id?: string
           image_urls?: string[] | null
+          legacy_unverified_references_used?: boolean | null
           pop_name?: string | null
           pop_number?: string | null
           score?: number | null

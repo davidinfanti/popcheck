@@ -6,6 +6,7 @@ import { Link2, Loader2, Rocket, AlertTriangle, Check } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Progress } from "@/components/ui/progress";
 import { motion, AnimatePresence } from "framer-motion";
+import { isApprovedEbayUrl } from "../../../supabase/functions/_shared/ebay-url";
 
 interface UrlImportBarProps {
   onImagesScraped: (images: Record<string, string>) => void;
@@ -36,7 +37,7 @@ export default function UrlImportBar({ onImagesScraped, onAutoAnalyze }: UrlImpo
     if (!trimmed) return;
 
     // Only allow eBay URLs
-    if (!/ebay\.\w+/i.test(trimmed)) {
+    if (!isApprovedEbayUrl(trimmed)) {
       toast.error("Only eBay links are supported at this time.");
       return;
     }
