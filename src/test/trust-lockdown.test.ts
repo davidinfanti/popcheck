@@ -54,6 +54,14 @@ describe("Edge Function trust boundaries", () => {
     expect(source).not.toMatch(/const\s*\{[^}]*imageUrls[^}]*\}\s*=\s*await req\.json/);
   });
 
+  it("persists a controlled evidence-required state before returning validation errors", () => {
+    const source = projectFile("supabase/functions/analyze-funko/index.ts");
+
+    expect(source).toContain('status: "evidence_required"');
+    expect(source).toContain("details: { failure }");
+    expect(source).toContain("toSafeEvidenceFailure");
+  });
+
   it("retains explicit authentication and ownership checks", () => {
     const analyze = projectFile("supabase/functions/analyze-funko/index.ts");
     const scrape = projectFile("supabase/functions/scrape-listing/index.ts");
@@ -95,7 +103,7 @@ describe("assessment privilege migration", () => {
   });
 
   it("preserves backend writes and adds minimum audit fields", () => {
-    expect(migration).toContain("GRANT UPDATE ON public.authentications TO service_role");
+    expect(migration).toContain("GRANT SELECT, UPDATE ON public.authentications TO service_role");
     for (const column of [
       "analysis_model",
       "analysis_config_version",

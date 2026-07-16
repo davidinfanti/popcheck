@@ -8,8 +8,9 @@ export function dispatchIndependentAnalysis(
   fetcher: FetchLike,
   apiKey: string,
   payload: Record<string, unknown>,
+  endpoint = LOVABLE_ANALYSIS_ENDPOINT,
 ): Promise<Response> {
-  return fetcher(LOVABLE_ANALYSIS_ENDPOINT, {
+  return fetcher(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   EvidenceValidationError,
   resolveCanonicalEvidence,
+  toSafeEvidenceFailure,
 } from "../../supabase/functions/_shared/evidence-source";
 
 const supabaseUrl = "https://project-ref.supabase.co";
@@ -45,6 +46,17 @@ describe("canonical evidence resolution", () => {
     })).toThrowError(expect.objectContaining({ code: "MISSING_CANONICAL_IMAGES" }));
   });
 
+  it("accepts the exact loopback Supabase origin for real local integration tests", () => {
+    const localUrl = "http://127.0.0.1:54321";
+    const localImage = `${localUrl}/storage/v1/object/public/funko-images/${ownerId}/front.jpg`;
+
+    expect(resolveCanonicalEvidence({
+      canonicalUrls: [localImage],
+      userId: ownerId,
+      supabaseUrl: localUrl,
+    })).toEqual({ imageUrls: [localImage], source: "physical_scan" });
+  });
+
   it("isolates approved eBay image evidence as the legacy listing path", () => {
     const listingImage = "https://i.ebayimg.com/images/g/example/s-l1600.jpg";
     const result = resolveCanonicalEvidence({
@@ -67,5 +79,18 @@ describe("canonical evidence resolution", () => {
         supabaseUrl,
       })).toThrow(EvidenceValidationError);
     }
+  });
+
+  it("creates a safe structured failure without persisting the rejected URL", () => {
+    const error = new EvidenceValidationError("UNAPPROVED_IMAGE_SOURCE", "Rejected https://secret.example/private.jpg");
+    const failure = toSafeEvidenceFailure(error, "2026-07-16T10:00:00.000Z");
+
+    expect(failure).toEqual({
+      type: "evidence_validation",
+      code: "UNAPPROVED_IMAGE_SOURCE",
+      message: "A canonical image comes from an unapproved evidence source.",
+      occurredAt: "2026-07-16T10:00:00.000Z",
+    });
+    expect(JSON.stringify(failure)).not.toContain("secret.example");
   });
 });

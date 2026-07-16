@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { ArrowLeft, AlertTriangle, Home, ShieldAlert, ShieldCheck, ShieldQuestion, ScanLine, FileText, Eye, Flag, Download, RefreshCw, Loader2 } from "lucide-react";
 import ComparisonSlider from "@/components/results/ComparisonSlider";
 import { generateCertificatePDF } from "@/utils/generateCertificate";
+import { getAnalysisSourceDisclosure, getSourceAwareVerdict } from "@/lib/analysisSourceDisclosure";
 
 interface CategoryScores {
   typography: number;
@@ -184,6 +185,8 @@ export default function Results() {
   }
 
   const score: number = auth.score ?? 0;
+  const analysisSource: string | null = auth.analysis_source ?? null;
+  const sourceDisclosure = getAnalysisSourceDisclosure(analysisSource);
   const details: AnalysisDetails = (auth.details as AnalysisDetails) || { summary: "", anomalies: [], perImage: [] };
   const categoryScores = details.categoryScores;
 
@@ -191,7 +194,7 @@ export default function Results() {
   const isPartial = photoCount < 6;
 
   const VerdictIcon = score >= 80 ? ShieldCheck : score >= 50 ? ShieldQuestion : ShieldAlert;
-  const verdictLabel = score >= 80 ? "HIGHLY LIKELY AUTHENTIC" : score >= 50 ? "UNCERTAIN — REVIEW NEEDED" : "POTENTIAL COUNTERFEIT";
+  const verdictLabel = getSourceAwareVerdict(score, analysisSource);
   const verdictColor = score >= 80 ? "text-success" : score >= 50 ? "text-warning" : "text-destructive";
   const glowClass = score >= 80 ? "glow-green" : score >= 50 ? "glow-amber" : "glow-red";
 
@@ -224,6 +227,12 @@ export default function Results() {
                   <span className="text-xs font-mono text-muted-foreground">
                     {"📸 Partial analysis (" + photoCount + "/6 photos)"}
                   </span>
+                </div>
+              )}
+              {sourceDisclosure && (
+                <div role="alert" className="mt-4 max-w-2xl rounded-lg border border-warning/50 bg-warning/10 px-4 py-3 text-center">
+                  <p className="text-sm font-semibold text-warning">Legacy listing-image assessment</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{sourceDisclosure}</p>
                 </div>
               )}
               {(details as any).cacheHit && (
@@ -486,11 +495,12 @@ export default function Results() {
                 date: new Date(auth.created_at).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
                 publicUrl,
                 frontImageUrl: frontImg,
+                analysisSource,
               });
-              toast.success("PDF Certificate generated!");
+              toast.success(analysisSource === "listing_legacy" ? "Listing assessment PDF generated!" : "PDF Certificate generated!");
             }}
           >
-            <Download className="w-4 h-4 mr-2" /> Download PDF Certificate
+            <Download className="w-4 h-4 mr-2" /> {analysisSource === "listing_legacy" ? "Download Listing Assessment PDF" : "Download PDF Certificate"}
           </Button>
         </div>
         {/* Re-analyze: only owner of an UNCERTAIN / FAKE scan can re-run */}

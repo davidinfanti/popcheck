@@ -19,6 +19,22 @@ export class EvidenceValidationError extends Error {
   }
 }
 
+const SAFE_FAILURE_MESSAGES: Record<EvidenceValidationError["code"], string> = {
+  MISSING_CANONICAL_IMAGES: "No canonical images are attached to this submission.",
+  INVALID_IMAGE_URL: "A canonical image record is invalid.",
+  UNAUTHORIZED_STORAGE_OBJECT: "A canonical image is not owned by the submission owner.",
+  UNAPPROVED_IMAGE_SOURCE: "A canonical image comes from an unapproved evidence source.",
+};
+
+export function toSafeEvidenceFailure(error: EvidenceValidationError, occurredAt: string) {
+  return {
+    type: "evidence_validation" as const,
+    code: error.code,
+    message: SAFE_FAILURE_MESSAGES[error.code],
+    occurredAt,
+  };
+}
+
 function validateModeAUrl(url: URL, userId: string, supabaseOrigin: string): boolean {
   if (url.origin !== supabaseOrigin) return false;
 
@@ -57,7 +73,10 @@ export function resolveCanonicalEvidence(input: {
     throw new EvidenceValidationError("MISSING_CANONICAL_IMAGES", "No canonical images are attached to this submission.");
   }
 
-  const supabaseOrigin = new URL(supabaseUrl).origin;
+  const parsedSupabaseUrl = new URL(supabaseUrl);
+  const supabaseOrigin = parsedSupabaseUrl.origin;
+  const localSupabase = parsedSupabaseUrl.protocol === "http:" &&
+    ["127.0.0.1", "localhost", "host.lima.internal"].includes(parsedSupabaseUrl.hostname);
   let hasLegacyListingImage = false;
 
   const imageUrls = canonicalUrls.map((rawUrl) => {
@@ -68,7 +87,8 @@ export function resolveCanonicalEvidence(input: {
       throw new EvidenceValidationError("INVALID_IMAGE_URL", "A canonical image URL is invalid.");
     }
 
-    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.port) {
+    const approvedProtocol = parsed.protocol === "https:" || (localSupabase && parsed.origin === supabaseOrigin);
+    if (!approvedProtocol || parsed.username || parsed.password || (parsed.port && parsed.origin !== supabaseOrigin)) {
       throw new EvidenceValidationError("INVALID_IMAGE_URL", "Canonical image URLs must use HTTPS without credentials or custom ports.");
     }
 

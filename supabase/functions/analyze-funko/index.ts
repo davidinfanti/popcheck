@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { EvidenceValidationError, resolveCanonicalEvidence } from "../_shared/evidence-source.ts";
+import { EvidenceValidationError, resolveCanonicalEvidence, toSafeEvidenceFailure } from "../_shared/evidence-source.ts";
 import {
   ANALYSIS_CONFIG_VERSION,
   ANALYSIS_MODEL,
@@ -73,12 +73,36 @@ serve(async (req) => {
 
     // The request-body image array is intentionally ignored. Only the owned row's
     // canonical evidence can reach the model.
-    const canonicalEvidence = resolveCanonicalEvidence({
-      canonicalUrls: ownedRow.image_urls,
-      requestedUrls: Array.isArray(requestBody?.imageUrls) ? requestBody.imageUrls : null,
-      userId: callerUserId,
-      supabaseUrl,
-    });
+    let canonicalEvidence: ReturnType<typeof resolveCanonicalEvidence>;
+    try {
+      canonicalEvidence = resolveCanonicalEvidence({
+        canonicalUrls: ownedRow.image_urls,
+        requestedUrls: Array.isArray(requestBody?.imageUrls) ? requestBody.imageUrls : null,
+        userId: callerUserId,
+        supabaseUrl,
+      });
+    } catch (e) {
+      if (!(e instanceof EvidenceValidationError)) throw e;
+
+      const failure = toSafeEvidenceFailure(e, new Date().toISOString());
+      const { error: failureUpdateError } = await supabase
+        .from("authentications")
+        .update({
+          status: "evidence_required",
+          details: { failure },
+        })
+        .eq("id", authenticationId)
+        .eq("user_id", callerUserId);
+
+      if (failureUpdateError) {
+        console.error("Failed to persist evidence validation state:", failureUpdateError.message);
+      }
+
+      return new Response(
+        JSON.stringify({ error: e.code, message: e.message }),
+        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
     const imageUrls = canonicalEvidence.imageUrls;
     const analysisSource = canonicalEvidence.source;
     const popName = ownedRow.pop_name;
@@ -223,13 +247,19 @@ PIXEL-LEVEL DIFFERENTIAL ANALYSIS PROTOCOL:
     const legacyUnverifiedReferencesUsed = Boolean(
       negRefs?.length || refs?.length || origRefs?.length || fakeRefs?.length || legacyReferenceImageUrl,
     );
+    const analysisModeContext = analysisSource === "listing_legacy"
+      ? `\n=== LEGACY LISTING-IMAGE EVIDENCE LIMIT ===
+The physical item was not examined. Assess only what is visible in the supplied listing images.
+Do not claim physical handling, hidden stamps, mold behavior, material feel, or other physical-only conclusions.
+Mark unavailable physical checks as not visible/not evaluable and frame the output as listing-image risk assessment, not physical-item certification.\n`
+      : "";
 
-    const systemPrompt = buildSystemPrompt(totalPhotos, referenceContext, negativeContext, rulesContext, comparativeInstructions, legacyImageContext, systemInstructionsOverride);
+    const systemPrompt = buildSystemPrompt(totalPhotos, referenceContext, negativeContext, rulesContext, comparativeInstructions, legacyImageContext, analysisModeContext, systemInstructionsOverride);
 
     const userContent = [
       {
         type: "text",
-        text: `Analyze this Funko Pop for authenticity. ${totalPhotos} photo(s) provided.${popName ? ` Pop Name: ${popName}` : ""}${popNumber ? ` Pop Number: ${popNumber}` : ""}
+        text: `${analysisSource === "listing_legacy" ? "Assess these legacy listing images for visible authenticity risk; the physical item was not examined." : "Analyze this Funko Pop for authenticity."} ${totalPhotos} photo(s) provided.${popName ? ` Pop Name: ${popName}` : ""}${popNumber ? ` Pop Number: ${popNumber}` : ""}
 ${hasOrigRefs ? `\n${origRefs.length} legacy original-labelled image(s) are appended as unverified context.` : ""}${hasFakeRefs ? `\n${fakeRefs.length} legacy counterfeit-labelled image(s) are appended as unverified context.` : ""}${legacyReferenceImageUrl && !hasOrigRefs ? `\nAn admin-managed legacy reference image with unverified provenance is appended.` : ""}
 Provide thorough investigative notes. If fewer than 6 photos, score only what you can see and return -1 for categories you cannot evaluate.`,
       },
@@ -331,7 +361,7 @@ Provide thorough investigative notes. If fewer than 6 photos, score only what yo
         },
       ],
       tool_choice: { type: "function", function: { name: "submit_vstamp_analysis" } },
-    });
+    }, Deno.env.get("LOVABLE_ANALYSIS_ENDPOINT") || undefined);
 
     if (!response.ok) {
       const errText = await response.text();
@@ -511,12 +541,6 @@ Provide thorough investigative notes. If fewer than 6 photos, score only what yo
     });
   } catch (e) {
     console.error("analyze-funko error:", e);
-    if (e instanceof EvidenceValidationError) {
-      return new Response(
-        JSON.stringify({ error: e.code, message: e.message }),
-        { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
     return new Response(
       JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -524,7 +548,7 @@ Provide thorough investigative notes. If fewer than 6 photos, score only what yo
   }
 });
 
-function buildSystemPrompt(totalPhotos: number, referenceContext: string, negativeContext: string, rulesContext: string, comparativeInstructions: string, legacyImageContext: string, systemInstructionsOverride: string): string {
+function buildSystemPrompt(totalPhotos: number, referenceContext: string, negativeContext: string, rulesContext: string, comparativeInstructions: string, legacyImageContext: string, analysisModeContext: string, systemInstructionsOverride: string): string {
   return `You are a LEAD FORENSIC PATHOLOGIST for Funko Pop Authentication (PopCheck Engine). Your mission is ZERO-TOLERANCE detection of counterfeits using the Global Blueprint 2026.
 
 You will receive ${totalPhotos} images (may be fewer than 6 if the user didn't provide all angles).
@@ -534,6 +558,7 @@ ${legacyImageContext}
 ${negativeContext}
 ${rulesContext}
 ${comparativeInstructions}
+${analysisModeContext}
 ${systemInstructionsOverride ? `\n=== ADMIN OVERRIDE INSTRUCTIONS ===\n${systemInstructionsOverride}\n` : ""}
 
 ═══════════════════════════════════════════════════════

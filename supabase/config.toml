@@ -1,7 +1,11 @@
 project_id = "utfhwabulcbkzgmuilvz"
 
 [functions.analyze-funko]
+enabled = true
 verify_jwt = true
+entrypoint = "./functions/analyze-funko/index.ts"
 
 [functions.scrape-listing]
+enabled = true
 verify_jwt = true
+entrypoint = "./functions/scrape-listing/index.ts"

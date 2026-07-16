@@ -83,8 +83,9 @@ CREATE TRIGGER guard_authentication_assessment_fields
 
 -- The current browser has no legitimate authentication-row UPDATE use case.
 -- RLS remains in place for defense in depth if UPDATE is deliberately re-granted later.
+GRANT SELECT, INSERT, DELETE ON public.authentications TO authenticated;
 REVOKE UPDATE ON public.authentications FROM anon, authenticated;
-GRANT UPDATE ON public.authentications TO service_role;
+GRANT SELECT, UPDATE ON public.authentications TO service_role;
 
 COMMENT ON COLUMN public.authentications.cache_key IS
   'Deprecated Phase 1A compatibility column. Must not influence analysis or results.';
