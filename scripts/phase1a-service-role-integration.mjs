@@ -143,7 +143,7 @@ assert.equal(completedRow.status, "completed");
 assert.equal(completedRow.score, null, "Phase 1B must not populate the legacy score");
 assert.equal(completedRow.details.phase1b, true);
 assert.equal(completedRow.details.decision.verdictClass, "no_material_anomaly_detected");
-assert.equal(completedRow.analysis_model, "gemini-3-flash-preview");
+assert.equal(completedRow.analysis_model, "gemini-3.5-flash");
 assert.equal(completedRow.analysis_config_version, "popcheck-observation-v1");
 assert.equal(completedRow.analysis_source, "physical_scan");
 assert.equal(completedRow.legacy_unverified_references_used, false);

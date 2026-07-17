@@ -41,7 +41,7 @@ describe("direct Gemini provider adapter", () => {
     const headers = init.headers as Record<string, string>;
     const body = JSON.parse(String(init.body));
 
-    expect(ANALYSIS_MODEL).toBe("gemini-3-flash-preview");
+    expect(ANALYSIS_MODEL).toBe("gemini-3.5-flash");
     expect(headers["x-goog-api-key"]).toBe("server-only-key");
     expect(body.systemInstruction.parts[0].text).toBe(request.systemInstruction);
     expect(body.contents[0].parts[0].text).toBe(request.prompt);

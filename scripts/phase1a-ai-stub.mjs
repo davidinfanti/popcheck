@@ -12,7 +12,7 @@ const baseObservation = {
   limitation: null,
   referenceUsed: null,
   referenceReliability: "none",
-  modelVersion: "gemini-3-flash-preview",
+  modelVersion: "gemini-3.5-flash",
 };
 
 const observationOutput = {
@@ -64,7 +64,7 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (request.method !== "POST" || request.url !== "/v1beta/models/gemini-3-flash-preview:generateContent") {
+  if (request.method !== "POST" || request.url !== "/v1beta/models/gemini-3.5-flash:generateContent") {
     response.writeHead(404).end();
     return;
   }

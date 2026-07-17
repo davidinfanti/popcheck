@@ -1,4 +1,4 @@
-export const ANALYSIS_MODEL = "gemini-3-flash-preview";
+export const ANALYSIS_MODEL = "gemini-3.5-flash";
 export const GEMINI_GENERATE_CONTENT_ENDPOINT =
   `https://generativelanguage.googleapis.com/v1beta/models/${ANALYSIS_MODEL}:generateContent`;
 
