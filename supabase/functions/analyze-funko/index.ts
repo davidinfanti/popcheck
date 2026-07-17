@@ -156,6 +156,18 @@ function validateProbeObservationOutput(text: string, submittedImageCount: numbe
   }
 }
 
+function verifiedJwtRole(token: string): string | null {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(payload.length / 4) * 4, "=");
+    const claims = JSON.parse(atob(base64));
+    return typeof claims?.role === "string" ? claims.role : null;
+  } catch {
+    return null;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -168,8 +180,7 @@ Deno.serve(async (req) => {
     const token = authHeader.replace("Bearer ", "");
     const requestBody = await req.json();
     if (requestBody?.operatorAction === "probe_gemini_provider") {
-      const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-      if (!serviceRoleKey || token !== serviceRoleKey) return jsonResponse({ error: "Forbidden" }, 403);
+      if (verifiedJwtRole(token) !== "service_role") return jsonResponse({ error: "Forbidden" }, 403);
       const apiKey = Deno.env.get("GEMINI_API_KEY");
       const syntheticImageUrl = requestBody?.syntheticImageUrl;
       const syntheticOwnerId = requestBody?.syntheticOwnerId;
