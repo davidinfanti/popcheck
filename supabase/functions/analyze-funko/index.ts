@@ -165,15 +165,11 @@ Deno.serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
-    const userClient = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: authHeader } },
-    });
     const token = authHeader.replace("Bearer ", "");
-    const { data: claimsData, error: claimsError } = await userClient.auth.getClaims(token);
-    if (claimsError || !claimsData?.claims) return jsonResponse({ error: "Unauthorized" }, 401);
     const requestBody = await req.json();
     if (requestBody?.operatorAction === "probe_gemini_provider") {
-      if (claimsData.claims.role !== "service_role") return jsonResponse({ error: "Forbidden" }, 403);
+      const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+      if (!serviceRoleKey || token !== serviceRoleKey) return jsonResponse({ error: "Forbidden" }, 403);
       const apiKey = Deno.env.get("GEMINI_API_KEY");
       const syntheticImageUrl = requestBody?.syntheticImageUrl;
       const syntheticOwnerId = requestBody?.syntheticOwnerId;
@@ -206,7 +202,12 @@ Deno.serve(async (req) => {
       if (firstFailure) console.error("Gemini provider probe failure:", JSON.stringify(firstFailure));
       return jsonResponse({ success: !firstFailure, probes });
     }
-    if (!claimsData.claims.sub) return jsonResponse({ error: "Unauthorized" }, 401);
+
+    const userClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: claimsData, error: claimsError } = await userClient.auth.getClaims(token);
+    if (claimsError || !claimsData?.claims?.sub) return jsonResponse({ error: "Unauthorized" }, 401);
     const callerUserId = claimsData.claims.sub as string;
     const authenticationId = requestBody?.authenticationId;
     if (typeof authenticationId !== "string" || !authenticationId) {
