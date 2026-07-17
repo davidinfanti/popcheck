@@ -12,7 +12,7 @@ const baseObservation = {
   limitation: null,
   referenceUsed: null,
   referenceReliability: "none",
-  modelVersion: "google/gemini-3-flash-preview",
+  modelVersion: "gemini-3-flash-preview",
 };
 
 const observationOutput = {
@@ -64,19 +64,30 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+  if (request.method !== "POST" || request.url !== "/v1beta/models/gemini-3-flash-preview:generateContent") {
     response.writeHead(404).end();
     return;
   }
 
-  let body = "";
-  for await (const chunk of request) body += chunk;
+  let rawBody = "";
+  for await (const chunk of request) rawBody += chunk;
+  const body = JSON.parse(rawBody);
+  const parts = body?.contents?.[0]?.parts;
+  const encodedEvidence = Array.isArray(parts)
+    ? parts.find((part) => typeof part?.inlineData?.data === "string")?.inlineData?.data
+    : null;
+  const evidenceMarker = encodedEvidence ? Buffer.from(encodedEvidence, "base64").toString("utf8") : "";
 
   if (
-    body.includes("attacker.example") ||
-    !body.includes("/storage/v1/object/public/funko-images/") ||
-    !body.includes("submit_popcheck_observations") ||
-    body.includes("submit_vstamp_analysis")
+    typeof request.headers["x-goog-api-key"] !== "string" ||
+    body?.generationConfig?.responseMimeType !== "application/json" ||
+    body?.generationConfig?.responseJsonSchema?.properties?.schemaVersion?.enum?.[0] !== "popcheck-observation-schema-v1" ||
+    !body?.systemInstruction?.parts?.[0]?.text?.includes("POPCHECK observation extractor") ||
+    !Array.isArray(parts) ||
+    !encodedEvidence ||
+    rawBody.includes("attacker.example") ||
+    rawBody.includes("submit_vstamp_analysis") ||
+    rawBody.includes('"tools"')
   ) {
     response.writeHead(400, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ error: "Request did not use canonical evidence and the Phase 1B observation contract." }));
@@ -84,35 +95,29 @@ const server = createServer(async (request, response) => {
   }
 
   analysisCalls += 1;
-  if (body.includes("/stub-refusal.jpg")) {
+  if (evidenceMarker.includes("stub-refusal")) {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ choices: [{ message: { refusal: "Stubbed refusal." } }] }));
+    response.end(JSON.stringify({ promptFeedback: { blockReason: "SAFETY" } }));
     return;
   }
-  if (body.includes("/stub-incomplete.jpg")) {
+  if (evidenceMarker.includes("stub-incomplete")) {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ choices: [{ message: { content: "No tool call in this fixture." } }] }));
+    response.end(JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [] } }] }));
     return;
   }
-  if (body.includes("/stub-malformed.jpg")) {
+  if (evidenceMarker.includes("stub-malformed")) {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({
-      choices: [{ message: { tool_calls: [{ function: { name: "submit_popcheck_observations", arguments: "{malformed" } }] } }],
-    }));
+    response.end(JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: "{malformed" }] } }] }));
+    return;
+  }
+  if (evidenceMarker.includes("stub-provider-error")) {
+    response.writeHead(503, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: { code: 503, message: "Synthetic provider failure" } }));
     return;
   }
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify({
-    choices: [{
-      message: {
-        tool_calls: [{
-          function: {
-            name: "submit_popcheck_observations",
-            arguments: JSON.stringify(observationOutput),
-          },
-        }],
-      },
-    }],
+    candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify(observationOutput) }] } }],
   }));
 });
 

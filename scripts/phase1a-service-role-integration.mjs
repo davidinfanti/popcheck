@@ -6,6 +6,10 @@ const anonKey = process.env.SUPABASE_ANON_KEY;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const stubUrl = process.env.AI_STUB_STATUS_URL || "http://127.0.0.1:54329/calls";
 const canonicalSupabaseUrl = process.env.CANONICAL_SUPABASE_URL || apiUrl;
+const onePixelPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
 
 assert(apiUrl && anonKey && serviceRoleKey, "Local Supabase URL and keys are required in the process environment.");
 
@@ -45,6 +49,20 @@ async function insertSubmission(user, imageUrls) {
   assert.equal(response.status, 201, `client submission insert failed with ${response.status}`);
   assert.equal(data.length, 1);
   return data[0];
+}
+
+async function uploadEvidence(userId, fileName, bytes = onePixelPng) {
+  const response = await fetch(`${apiUrl}/storage/v1/object/funko-images/${userId}/${fileName}`, {
+    method: "POST",
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+      "Content-Type": "image/png",
+      "x-upsert": "true",
+    },
+    body: bytes,
+  });
+  assert([200, 201].includes(response.status), `synthetic evidence upload failed with ${response.status}`);
 }
 
 async function invoke(user, authenticationId, extraBody = {}) {
@@ -96,6 +114,7 @@ const initialAnalysisCalls = initialStubStatus.data.analysisCalls;
 
 const owner = await signUp("owner");
 const other = await signUp("other");
+await uploadEvidence(owner.userId, "front.jpg");
 const canonicalUrl = `${canonicalSupabaseUrl}/storage/v1/object/public/funko-images/${owner.userId}/front.jpg`;
 const submission = await insertSubmission(owner, [canonicalUrl]);
 
@@ -124,7 +143,7 @@ assert.equal(completedRow.status, "completed");
 assert.equal(completedRow.score, null, "Phase 1B must not populate the legacy score");
 assert.equal(completedRow.details.phase1b, true);
 assert.equal(completedRow.details.decision.verdictClass, "no_material_anomaly_detected");
-assert.equal(completedRow.analysis_model, "google/gemini-3-flash-preview");
+assert.equal(completedRow.analysis_model, "gemini-3-flash-preview");
 assert.equal(completedRow.analysis_config_version, "popcheck-observation-v1");
 assert.equal(completedRow.analysis_source, "physical_scan");
 assert.equal(completedRow.legacy_unverified_references_used, false);
@@ -152,12 +171,13 @@ assert.equal(repeatedRuns[0].id, firstRuns[0].id, "the earlier run must remain u
 assert.notEqual(repeatedRuns[1].id, repeatedRuns[0].id);
 assert.equal(completedRow.details.audit.structuredGuidanceVersionId, null);
 
-async function assertControlledProviderFailure(marker, expectedCode) {
+async function assertControlledProviderFailure(marker, expectedCode, expectedStatus = 422) {
+  await uploadEvidence(owner.userId, `${marker}.jpg`, Buffer.from(marker));
   const failureSubmission = await insertSubmission(owner, [
     `${canonicalSupabaseUrl}/storage/v1/object/public/funko-images/${owner.userId}/${marker}.jpg`,
   ]);
   const failureResult = await invoke(owner, failureSubmission.id);
-  assert.equal(failureResult.response.status, 422, `${marker} must return a controlled 422`);
+  assert.equal(failureResult.response.status, expectedStatus, `${marker} must return a controlled ${expectedStatus}`);
   assert.equal(failureResult.data.error, expectedCode);
   const failureRow = await serviceRead(failureSubmission.id);
   assert.equal(failureRow.status, "failed");
@@ -169,6 +189,7 @@ async function assertControlledProviderFailure(marker, expectedCode) {
 await assertControlledProviderFailure("stub-refusal", "MODEL_REFUSAL");
 await assertControlledProviderFailure("stub-incomplete", "INCOMPLETE_MODEL_OUTPUT");
 await assertControlledProviderFailure("stub-malformed", "MALFORMED_MODEL_OUTPUT");
+await assertControlledProviderFailure("stub-provider-error", "PROVIDER_ERROR", 502);
 
 const rejectedSubmission = await insertSubmission(owner, ["https://attacker.example/private.jpg"]);
 const rejected = await invoke(owner, rejectedSubmission.id);
@@ -185,8 +206,8 @@ const stubStatus = await jsonResponse(await fetch(stubUrl));
 assert.equal(stubStatus.response.status, 200);
 assert.equal(
   stubStatus.data.analysisCalls,
-  initialAnalysisCalls + 5,
-  "only the two completed runs and three controlled provider-failure fixtures may call the AI stub",
+  initialAnalysisCalls + 6,
+  "only the two completed runs and four controlled provider-failure fixtures may call the Gemini stub",
 );
 
 console.log(JSON.stringify({
@@ -206,5 +227,6 @@ console.log(JSON.stringify({
   refusalFailedSafely: true,
   incompleteOutputFailedSafely: true,
   malformedOutputFailedSafely: true,
+  providerErrorFailedSafely: true,
   paidAiCalls: 0,
 }, null, 2));

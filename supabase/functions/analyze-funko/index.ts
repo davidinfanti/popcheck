@@ -1,7 +1,11 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { EvidenceValidationError, resolveCanonicalEvidence, toSafeEvidenceFailure } from "../_shared/evidence-source.ts";
-import { ANALYSIS_MODEL, dispatchIndependentAnalysis } from "../_shared/independent-analysis.ts";
+import {
+  ANALYSIS_MODEL,
+  GeminiEvidenceFetchError,
+  dispatchGeminiAnalysis,
+  extractGeminiStructuredText,
+} from "../_shared/gemini-provider.ts";
 import {
   CONFIDENCE_LEVELS,
   DECISION_ENGINE_VERSION,
@@ -37,25 +41,6 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function extractToolArguments(value: unknown): { arguments: string | null; refused: boolean } {
-  if (!isRecord(value) || !Array.isArray(value.choices) || !isRecord(value.choices[0])) {
-    return { arguments: null, refused: false };
-  }
-  const message = value.choices[0].message;
-  if (!isRecord(message)) return { arguments: null, refused: false };
-  const refused = typeof message.refusal === "string" && message.refusal.length > 0;
-  if (!Array.isArray(message.tool_calls) || !isRecord(message.tool_calls[0])) return { arguments: null, refused };
-  const fn = message.tool_calls[0].function;
-  if (!isRecord(fn) || fn.name !== "submit_popcheck_observations" || typeof fn.arguments !== "string") {
-    return { arguments: null, refused };
-  }
-  return { arguments: fn.arguments, refused };
 }
 
 async function persistControlledFailure(
@@ -154,7 +139,7 @@ const observationTool = {
   },
 };
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
@@ -185,9 +170,8 @@ serve(async (req) => {
       .maybeSingle();
     if (!ownedRow) return jsonResponse({ error: "Forbidden" }, 403);
 
-    const apiKey = Deno.env.get("LOVABLE_API_KEY");
-    if (!apiKey) throw new Error("LOVABLE_API_KEY is not configured");
     const serviceClient = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const apiKey = Deno.env.get("GEMINI_API_KEY");
     const completionToken = crypto.randomUUID();
 
     let canonicalEvidence: ReturnType<typeof resolveCanonicalEvidence>;
@@ -238,23 +222,20 @@ serve(async (req) => {
         .maybeSingle(),
     ]);
 
-    const imageContents: Array<Record<string, unknown>> = canonicalEvidence.imageUrls.map((url) => ({
-      type: "image_url",
-      image_url: { url },
-    }));
+    const providerImageUrls = [...canonicalEvidence.imageUrls];
     const referenceNotes: string[] = [];
 
     for (const reference of originalRes.data || []) {
-      imageContents.push({ type: "image_url", image_url: { url: reference.image_url } });
+      providerImageUrls.push(reference.image_url);
       referenceNotes.push(`legacy_original:${reference.id} part=${reference.part_type}; note=${reference.expert_note || "none"}`);
     }
     for (const reference of fakeRes.data || []) {
-      imageContents.push({ type: "image_url", image_url: { url: reference.image_url } });
+      providerImageUrls.push(reference.image_url);
       referenceNotes.push(`legacy_counterfeit:${reference.id} part=${reference.part_type}; note=${reference.detected_flaw || "none"}`);
     }
     const referencePop = referencePopRes.data?.[0];
     if (referencePop?.official_image_url && !(originalRes.data?.length)) {
-      imageContents.push({ type: "image_url", image_url: { url: referencePop.official_image_url } });
+      providerImageUrls.push(referencePop.official_image_url);
       referenceNotes.push(`legacy_product:${referencePop.id} name=${referencePop.name}; number=${referencePop.number}; category=${referencePop.category}`);
     }
     for (const reference of negativeRes.data || []) {
@@ -269,55 +250,66 @@ serve(async (req) => {
       referenceNotes,
       guidance: guidance ? renderStructuredGuidance(guidance) : null,
     });
-    const userContent = [
-      {
-        type: "text",
-        text: `Inspect ${canonicalEvidence.imageUrls.length} submitted image(s). Submitted images are indices 0-${canonicalEvidence.imageUrls.length - 1}. Any appended reference images are context only and are legacy_unverified. Return null for every unreadable identity field.`,
-      },
-      ...imageContents,
-    ];
+    const userPrompt = `Inspect ${canonicalEvidence.imageUrls.length} submitted image(s). Submitted images are indices 0-${canonicalEvidence.imageUrls.length - 1}. Any appended reference images are context only and are legacy_unverified. Return null for every unreadable identity field.`;
+
+    if (!apiKey) {
+      await persistControlledFailure(serviceClient, authenticationId, callerUserId, "PROVIDER_CONFIGURATION", "The observation provider is not configured.");
+      return jsonResponse({ error: "PROVIDER_CONFIGURATION", message: "Analysis provider unavailable." }, 503);
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
     let response: Response;
     try {
-      response = await dispatchIndependentAnalysis(fetch, apiKey, {
-        model: ANALYSIS_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
-        ],
-        tools: [observationTool],
-        tool_choice: { type: "function", function: { name: "submit_popcheck_observations" } },
-      }, Deno.env.get("LOVABLE_ANALYSIS_ENDPOINT") || undefined, controller.signal);
+      response = await dispatchGeminiAnalysis(fetch, apiKey, {
+        systemInstruction: systemPrompt,
+        prompt: userPrompt,
+        imageUrls: providerImageUrls,
+        responseJsonSchema: observationTool.function.parameters,
+      }, Deno.env.get("GEMINI_API_ENDPOINT") || undefined, controller.signal);
     } catch (error) {
       clearTimeout(timeout);
       if (error instanceof DOMException && error.name === "AbortError") {
         await persistControlledFailure(serviceClient, authenticationId, callerUserId, "PROVIDER_TIMEOUT", "The observation provider timed out before returning a complete response.");
         return jsonResponse({ error: "PROVIDER_TIMEOUT", message: "Analysis timed out." }, 504);
       }
-      throw error;
+      if (error instanceof GeminiEvidenceFetchError) {
+        await persistControlledFailure(serviceClient, authenticationId, callerUserId, error.code, error.message);
+        return jsonResponse({ error: error.code, message: "Evidence could not be prepared for analysis." }, 422);
+      }
+      await persistControlledFailure(serviceClient, authenticationId, callerUserId, "PROVIDER_ERROR", "The observation provider request failed safely.");
+      return jsonResponse({ error: "PROVIDER_ERROR", message: "Analysis provider unavailable." }, 502);
     } finally {
       clearTimeout(timeout);
     }
 
     if (!response.ok) {
-      const code = response.status === 429 ? "PROVIDER_RATE_LIMIT" : response.status === 402 ? "PROVIDER_CREDITS" : "PROVIDER_ERROR";
+      const code = response.status === 429
+        ? "PROVIDER_RATE_LIMIT"
+        : response.status === 401 || response.status === 403
+        ? "PROVIDER_AUTH"
+        : "PROVIDER_ERROR";
       await persistControlledFailure(serviceClient, authenticationId, callerUserId, code, "The observation provider did not return a usable response.");
-      return jsonResponse({ error: code, message: "Analysis provider unavailable." }, response.status === 429 || response.status === 402 ? response.status : 502);
+      return jsonResponse({ error: code, message: "Analysis provider unavailable." }, response.status === 429 ? 429 : 502);
     }
 
-    const providerResult = await response.json();
-    const toolResult = extractToolArguments(providerResult);
-    if (!toolResult.arguments) {
-      const code = toolResult.refused ? "MODEL_REFUSAL" : "INCOMPLETE_MODEL_OUTPUT";
+    let providerResult: unknown;
+    try {
+      providerResult = await response.json();
+    } catch {
+      await persistControlledFailure(serviceClient, authenticationId, callerUserId, "MALFORMED_PROVIDER_RESPONSE", "The observation provider returned an unreadable response.");
+      return jsonResponse({ error: "MALFORMED_PROVIDER_RESPONSE", message: "Analysis provider unavailable." }, 502);
+    }
+    const structuredResult = extractGeminiStructuredText(providerResult);
+    if (!structuredResult.text) {
+      const code = structuredResult.refused ? "MODEL_REFUSAL" : "INCOMPLETE_MODEL_OUTPUT";
       await persistControlledFailure(serviceClient, authenticationId, callerUserId, code, "The model did not return the required structured observation set.");
       return jsonResponse({ error: code, message: "No assessment verdict was generated." }, 422);
     }
 
     let rawOutput: unknown;
     try {
-      rawOutput = JSON.parse(toolResult.arguments);
+      rawOutput = JSON.parse(structuredResult.text);
     } catch {
       await persistControlledFailure(serviceClient, authenticationId, callerUserId, "MALFORMED_MODEL_OUTPUT", "The model returned malformed structured data.");
       return jsonResponse({ error: "MALFORMED_MODEL_OUTPUT", message: "No assessment verdict was generated." }, 422);
@@ -442,5 +434,5 @@ ${references}
 
 ${guidance}
 
-Return only the required submit_popcheck_observations function call. The model has no authority to set the POPCHECK decision-engine verdict.`;
+Return only one JSON object matching popcheck-observation-schema-v1. The model has no authority to set the POPCHECK decision-engine verdict.`;
 }
