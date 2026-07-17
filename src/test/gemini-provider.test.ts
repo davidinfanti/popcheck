@@ -9,6 +9,7 @@ import {
 import {
   mapGeminiHttpFailure,
   readGeminiFailureDiagnostic,
+  runGeminiIsolationProbes,
   sanitizeProviderMessage,
 } from "../../supabase/functions/_shared/gemini-diagnostics";
 
@@ -174,5 +175,65 @@ describe("direct Gemini provider adapter", () => {
     expect(safe.length).toBeLessThanOrEqual(500);
     expect(safe).not.toContain("private");
     expect(safe).not.toContain("Z".repeat(80));
+  });
+
+  it("isolates a full-schema 400 without returning prompts, images, or provider payloads", async () => {
+    let providerCalls = 0;
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/models/gemini-3.5-flash") && init?.method === "GET") {
+        return new Response(JSON.stringify({
+          name: "models/gemini-3.5-flash",
+          supportedGenerationMethods: ["generateContent"],
+        }), { status: 200 });
+      }
+      if (url === "https://synthetic.example/probe.png") {
+        return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+          status: 200,
+          headers: { "Content-Type": "image/png" },
+        });
+      }
+
+      providerCalls += 1;
+      if (providerCalls === 5 || providerCalls === 6) {
+        return new Response(JSON.stringify({
+          error: { status: "INVALID_ARGUMENT", message: "Request contains an invalid argument." },
+          ignoredPayload: { prompt: "must not be returned", image: "A".repeat(200) },
+        }), { status: 400, headers: { "x-goog-request-id": `request-${providerCalls}` } });
+      }
+      const text = providerCalls === 2 || providerCalls === 4
+        ? '{"name":"probe","status":"ready"}'
+        : '{"value":"ready"}';
+      return new Response(JSON.stringify({
+        candidates: [{ finishReason: "STOP", content: { parts: [{ text }] } }],
+      }), { status: 200 });
+    });
+
+    const probes = await runGeminiIsolationProbes({
+      fetcher,
+      apiKey: "server-only-key",
+      syntheticImageUrl: "https://synthetic.example/probe.png",
+      fullSchema: {
+        type: "object",
+        properties: { value: { type: "string", description: "A diagnostic value." } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+      fullSystemInstruction: "private full system instruction",
+      validateFullOutput: () => false,
+    });
+
+    expect(probes.map((probe) => [probe.probe, probe.result])).toEqual([
+      ["A", "PASS"], ["B", "PASS"], ["C", "PASS"], ["D", "PASS"], ["E", "PASS"], ["F", "FAIL"],
+    ]);
+    expect(probes.at(-1)?.schemaIsolation?.map(({ variant, result }) => [variant, result])).toEqual([
+      ["exact_schema_minimal_prompt", "FAIL"],
+      ["schema_without_descriptions", "PASS"],
+    ]);
+    const serialized = JSON.stringify(probes.at(-1));
+    expect(serialized).not.toContain("server-only-key");
+    expect(serialized).not.toContain("private full system instruction");
+    expect(serialized).not.toContain("must not be returned");
+    expect(serialized).not.toContain("AAAA");
   });
 });

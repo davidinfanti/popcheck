@@ -46,6 +46,22 @@ export interface GeminiProbeResult {
   elapsedMs: number;
   modelResponseReceived: boolean;
   internalCode: ProviderFailureCode | null;
+  schemaIsolation?: GeminiSchemaIsolationResult[];
+}
+
+export interface GeminiSchemaIsolationResult {
+  variant: string;
+  result: "PASS" | "FAIL";
+  upstreamHttpStatus: number | null;
+  googleErrorStatus: string | null;
+  sanitizedMessage: string | null;
+  requestIds: Record<string, string>;
+  model: string;
+  endpointVersion: string;
+  elapsedMs: number;
+  modelResponseReceived: boolean;
+  internalCode: ProviderFailureCode | null;
+  schemaBytes: number;
 }
 
 export function mapGeminiHttpFailure(status: number): ProviderFailureCode {
@@ -289,6 +305,117 @@ async function contentProbe(input: {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stripSchemaDescriptions(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripSchemaDescriptions);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "description" && key !== "title")
+      .map(([key, nested]) => [key, stripSchemaDescriptions(nested)]),
+  );
+}
+
+function schemaForTopLevelProperties(
+  fullSchema: Record<string, unknown>,
+  names: string[],
+): Record<string, unknown> | null {
+  const properties = fullSchema.properties;
+  if (!isRecord(properties) || names.some((name) => !(name in properties))) return null;
+  return {
+    type: "object",
+    properties: Object.fromEntries(names.map((name) => [name, properties[name]])),
+    required: names,
+    additionalProperties: false,
+  };
+}
+
+function schemaByteLength(schema: Record<string, unknown>): number {
+  return new TextEncoder().encode(JSON.stringify(toGeminiJsonSchema(schema))).byteLength;
+}
+
+async function schemaIsolationProbe(input: {
+  variant: string;
+  fetcher: FetchLike;
+  apiKey: string;
+  schema: Record<string, unknown>;
+}): Promise<GeminiSchemaIsolationResult> {
+  const result = await contentProbe({
+    probe: "F",
+    capability: `schema isolation: ${input.variant}`,
+    fetcher: input.fetcher,
+    apiKey: input.apiKey,
+    body: requestBody(
+      [{ text: "Return one concise JSON value matching the supplied diagnostic schema." }],
+      input.schema,
+    ),
+  });
+  return {
+    variant: input.variant,
+    result: result.result,
+    upstreamHttpStatus: result.upstreamHttpStatus,
+    googleErrorStatus: result.googleErrorStatus,
+    sanitizedMessage: result.sanitizedMessage,
+    requestIds: result.requestIds,
+    model: result.model,
+    endpointVersion: result.endpointVersion,
+    elapsedMs: result.elapsedMs,
+    modelResponseReceived: result.modelResponseReceived,
+    internalCode: result.internalCode,
+    schemaBytes: schemaByteLength(input.schema),
+  };
+}
+
+async function isolateFullSchemaFailure(input: {
+  fetcher: FetchLike;
+  apiKey: string;
+  fullSchema: Record<string, unknown>;
+}): Promise<GeminiSchemaIsolationResult[]> {
+  const results: GeminiSchemaIsolationResult[] = [];
+  const run = async (variant: string, schema: Record<string, unknown>) => {
+    const result = await schemaIsolationProbe({ ...input, variant, schema });
+    results.push(result);
+    return result;
+  };
+
+  // First remove prompt size/content as a confound while preserving the exact schema.
+  const exactSchema = await run("exact_schema_minimal_prompt", input.fullSchema);
+  if (exactSchema.result === "PASS") return results;
+
+  // Descriptions are supported, but can push an otherwise valid schema over provider complexity limits.
+  const compactSchema = stripSchemaDescriptions(input.fullSchema) as Record<string, unknown>;
+  const compact = await run("schema_without_descriptions", compactSchema);
+  if (compact.result === "PASS") return results;
+
+  const properties = input.fullSchema.properties;
+  if (!isRecord(properties)) return results;
+  const propertyNames = Object.keys(properties);
+  const individuallyPassing: string[] = [];
+  for (const name of propertyNames) {
+    const schema = schemaForTopLevelProperties(input.fullSchema, [name]);
+    if (!schema) continue;
+    const result = await run(`top_level_${name}`, schema);
+    if (result.result === "PASS") individuallyPassing.push(name);
+  }
+
+  // If every branch is accepted separately, find the first aggregate combination the provider rejects.
+  if (individuallyPassing.length === propertyNames.length) {
+    const progressive: string[] = [];
+    for (const name of propertyNames) {
+      progressive.push(name);
+      if (progressive.length === 1) continue;
+      const schema = schemaForTopLevelProperties(input.fullSchema, progressive);
+      if (!schema) continue;
+      const result = await run(`progressive_${progressive.join("+")}`, schema);
+      if (result.result === "FAIL") break;
+    }
+  }
+  return results;
+}
+
 export async function runGeminiIsolationProbes(input: {
   fetcher: FetchLike;
   apiKey: string;
@@ -387,11 +514,21 @@ export async function runGeminiIsolationProbes(input: {
   }))) return results;
 
   const fullTextPrompt = "Return a POPCHECK observation object for a text-only diagnostic. No image is available, so use not_visible observations, null image indices, and explicit limitations.";
-  if (!add(await contentProbe({
+  const fullTextResult = await contentProbe({
     probe: "F", capability: "full POPCHECK schema with text only", fetcher: input.fetcher, apiKey: input.apiKey,
     body: requestBody([{ text: fullTextPrompt }], input.fullSchema, input.fullSystemInstruction),
     validate: (text) => input.validateFullOutput(text, 0),
-  }))) return results;
+  });
+  if (fullTextResult.result === "FAIL" &&
+    fullTextResult.upstreamHttpStatus === 400 &&
+    fullTextResult.googleErrorStatus === "INVALID_ARGUMENT") {
+    fullTextResult.schemaIsolation = await isolateFullSchemaFailure({
+      fetcher: input.fetcher,
+      apiKey: input.apiKey,
+      fullSchema: input.fullSchema,
+    });
+  }
+  if (!add(fullTextResult)) return results;
 
   add(await contentProbe({
     probe: "G", capability: "full POPCHECK multimodal", fetcher: input.fetcher, apiKey: input.apiKey,
