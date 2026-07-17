@@ -105,9 +105,12 @@ export async function dispatchGeminiAnalysis(
       systemInstruction: { parts: [{ text: request.systemInstruction }] },
       contents: [{ role: "user", parts }],
       generationConfig: {
-        responseMimeType: "application/json",
-        responseJsonSchema: providerJsonSchema(request.responseJsonSchema),
-        temperature: 0.1,
+        responseFormat: {
+          text: {
+            mimeType: "application/json",
+            schema: providerJsonSchema(request.responseJsonSchema),
+          },
+        },
       },
     }),
     signal,
