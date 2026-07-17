@@ -6,6 +6,7 @@ const file = (path: string) => readFileSync(resolve(process.cwd(), path), "utf8"
 
 describe("Phase 1B scoring removal", () => {
   const analyze = file("supabase/functions/analyze-funko/index.ts");
+  const transport = file("supabase/functions/_shared/gemini-transport.ts");
 
   it("contains no executable legacy score, bonus, cap, or threshold flow", () => {
     expect(analyze).not.toContain("finalScore");
@@ -13,7 +14,8 @@ describe("Phase 1B scoring removal", () => {
     expect(analyze).not.toContain("weightedSum");
     expect(analyze).not.toMatch(/score:\s*final/);
     expect(analyze).not.toContain("submit_vstamp_analysis");
-    expect(analyze).toContain("submit_popcheck_observations");
+    expect(analyze).toContain("GEMINI_OBSERVATION_TRANSPORT_SCHEMA");
+    expect(transport).toContain("gemini-observation-transport-v1");
     expect(analyze).toContain("assessmentRunId");
   });
 
@@ -25,9 +27,11 @@ describe("Phase 1B scoring removal", () => {
   });
 
   it("does not let the model set a score, probability, or final verdict", () => {
-    const toolBlock = analyze.slice(analyze.indexOf("const observationTool"), analyze.indexOf("serve(async"));
-    expect(toolBlock).not.toMatch(/finalScore|verdictBand|authenticityScore|referenceConfidence/);
-    expect(toolBlock).toContain("Do not submit a score or final verdict");
+    expect(transport).not.toMatch(/finalScore|verdictBand|authenticityScore|referenceConfidence/);
+    expect(transport).not.toMatch(/score|probability|verdict/);
+    expect(analyze).toContain("Do not return score, verdict, probability, certification, or modelVersion fields");
+    expect(analyze).toContain("normalizeGeminiTransportOutput(rawOutput)");
+    expect(analyze).toContain("parseObservationOutput(normalizeGeminiTransportOutput(rawOutput))");
     expect(analyze).toContain("const assessment = decideAssessment(observationOutput)");
   });
 });

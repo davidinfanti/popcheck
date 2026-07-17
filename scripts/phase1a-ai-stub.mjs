@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 54329);
 let analysisCalls = 0;
+const transportNull = "__POPCHECK_NULL__";
 
 const baseObservation = {
   findingType: "supporting_consistency",
@@ -9,25 +10,24 @@ const baseObservation = {
   severity: "informational",
   confidenceLevel: "high",
   imageIndex: 0,
-  limitation: null,
-  referenceUsed: null,
+  limitation: transportNull,
+  referenceUsed: transportNull,
   referenceReliability: "none",
-  modelVersion: "google/gemini-3-flash-preview",
 };
 
 const observationOutput = {
-  schemaVersion: "popcheck-observation-schema-v1",
+  transportVersion: "gemini-observation-transport-v1",
   candidateIdentity: {
     popName: "Integration Fixture",
     popNumber: "101",
     series: "Animation",
-    barcode: null,
-    productionCode: null,
-    factory: null,
-    releaseYear: null,
-    sticker: null,
-    region: null,
-    copyrightStamp: null,
+    barcode: transportNull,
+    productionCode: transportNull,
+    factory: transportNull,
+    releaseYear: transportNull,
+    sticker: transportNull,
+    region: transportNull,
+    copyrightStamp: transportNull,
   },
   observations: [
     {
@@ -64,19 +64,36 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+  if (request.method !== "POST" || request.url !== "/v1beta/models/gemini-3.5-flash:generateContent") {
     response.writeHead(404).end();
     return;
   }
 
-  let body = "";
-  for await (const chunk of request) body += chunk;
+  let rawBody = "";
+  for await (const chunk of request) rawBody += chunk;
+  const body = JSON.parse(rawBody);
+  const parts = body?.contents?.[0]?.parts;
+  const encodedEvidence = Array.isArray(parts)
+    ? parts.find((part) => typeof part?.inlineData?.data === "string")?.inlineData?.data
+    : null;
+  const evidenceMarker = encodedEvidence ? Buffer.from(encodedEvidence, "base64").toString("utf8") : "";
+  const structuredSchemaMode =
+    body?.generationConfig?.responseFormat?.text?.mimeType === "APPLICATION_JSON" &&
+    body?.generationConfig?.responseFormat?.text?.schema?.properties?.transportVersion?.enum?.[0] ===
+      "gemini-observation-transport-v1";
+  const jsonFallbackMode =
+    body?.generationConfig?.responseMimeType === "application/json" &&
+    body?.generationConfig?.responseFormat === undefined;
 
   if (
-    body.includes("attacker.example") ||
-    !body.includes("/storage/v1/object/public/funko-images/") ||
-    !body.includes("submit_popcheck_observations") ||
-    body.includes("submit_vstamp_analysis")
+    typeof request.headers["x-goog-api-key"] !== "string" ||
+    (!structuredSchemaMode && !jsonFallbackMode) ||
+    !body?.systemInstruction?.parts?.[0]?.text?.includes("POPCHECK observation extractor") ||
+    !Array.isArray(parts) ||
+    !encodedEvidence ||
+    rawBody.includes("attacker.example") ||
+    rawBody.includes("submit_vstamp_analysis") ||
+    rawBody.includes('"tools"')
   ) {
     response.writeHead(400, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ error: "Request did not use canonical evidence and the Phase 1B observation contract." }));
@@ -84,35 +101,49 @@ const server = createServer(async (request, response) => {
   }
 
   analysisCalls += 1;
-  if (body.includes("/stub-refusal.jpg")) {
-    response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ choices: [{ message: { refusal: "Stubbed refusal." } }] }));
+  if (evidenceMarker.includes("stub-schema-compile") && structuredSchemaMode) {
+    response.writeHead(400, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      error: { code: 400, status: "INVALID_ARGUMENT", message: "Synthetic transport schema rejection" },
+    }));
     return;
   }
-  if (body.includes("/stub-incomplete.jpg")) {
+  if (evidenceMarker.includes("stub-refusal")) {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ choices: [{ message: { content: "No tool call in this fixture." } }] }));
+    response.end(JSON.stringify({ promptFeedback: { blockReason: "SAFETY" } }));
     return;
   }
-  if (body.includes("/stub-malformed.jpg")) {
+  if (evidenceMarker.includes("stub-incomplete")) {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [] } }] }));
+    return;
+  }
+  if (evidenceMarker.includes("stub-malformed")) {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ candidates: [{ finishReason: "STOP", content: { parts: [{ text: "{malformed" }] } }] }));
+    return;
+  }
+  if (evidenceMarker.includes("stub-provider-error")) {
+    response.writeHead(503, {
+      "Content-Type": "application/json",
+      "x-goog-request-id": "synthetic-request-id",
+    });
+    response.end(JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "Synthetic provider failure" } }));
+    return;
+  }
+  if (evidenceMarker.includes("stub-invalid-transport")) {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({
-      choices: [{ message: { tool_calls: [{ function: { name: "submit_popcheck_observations", arguments: "{malformed" } }] } }],
+      candidates: [{
+        finishReason: "STOP",
+        content: { parts: [{ text: JSON.stringify({ ...observationOutput, score: 99, verdict: "pass" }) }] },
+      }],
     }));
     return;
   }
   response.writeHead(200, { "Content-Type": "application/json" });
   response.end(JSON.stringify({
-    choices: [{
-      message: {
-        tool_calls: [{
-          function: {
-            name: "submit_popcheck_observations",
-            arguments: JSON.stringify(observationOutput),
-          },
-        }],
-      },
-    }],
+    candidates: [{ finishReason: "STOP", content: { parts: [{ text: JSON.stringify(observationOutput) }] } }],
   }));
 });
 
