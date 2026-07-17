@@ -120,6 +120,7 @@ export async function readGeminiFailureDiagnostic(input: {
   response: Response;
   apiKey: string;
   elapsedMs: number;
+  model?: string;
 }): Promise<SafeProviderDiagnostic> {
   let googleErrorStatus: string | null = null;
   let googleMessage: unknown = null;
@@ -145,7 +146,7 @@ export async function readGeminiFailureDiagnostic(input: {
     googleErrorStatus,
     sanitizedMessage: sanitizeProviderMessage(googleMessage, [input.apiKey]),
     requestIds: safeRequestIds(input.response.headers),
-    model: ANALYSIS_MODEL,
+    model: input.model || ANALYSIS_MODEL,
     endpointVersion: GEMINI_API_VERSION,
     elapsedMs: input.elapsedMs,
     internalCode: mapGeminiHttpFailure(input.response.status),

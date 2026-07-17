@@ -2,9 +2,11 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { EvidenceValidationError, resolveCanonicalEvidence, toSafeEvidenceFailure } from "../_shared/evidence-source.ts";
 import {
   ANALYSIS_MODEL,
+  GEMINI_TOTAL_TIMEOUT_MS,
   GeminiEvidenceFetchError,
   type GeminiProviderMode,
-  dispatchGeminiAnalysisWithFallback,
+  type GeminiResilientDispatchResult,
+  dispatchGeminiAnalysisWithResilience,
   extractGeminiStructuredText,
 } from "../_shared/gemini-provider.ts";
 import {
@@ -39,9 +41,43 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const PROVIDER_TIMEOUT_MS = 30_000;
-
 type ServiceClient = ReturnType<typeof createClient>;
+
+type SafeProviderAttempt = {
+  model: string;
+  providerMode: GeminiProviderMode;
+  upstreamHttpStatus: number;
+  elapsedMs: number;
+};
+
+type SafeProviderAudit = {
+  requestedPrimaryModel: string;
+  successfulModel: string | null;
+  attemptCount: number;
+  fallbackUsed: boolean;
+  providerMode: GeminiProviderMode | null;
+  providerSchemaVersion: string;
+  totalProviderLatencyMs: number;
+  attempts: SafeProviderAttempt[];
+};
+
+function safeProviderAudit(dispatched: GeminiResilientDispatchResult, successful: boolean): SafeProviderAudit {
+  return {
+    requestedPrimaryModel: dispatched.requestedPrimaryModel,
+    successfulModel: successful ? dispatched.model : null,
+    attemptCount: dispatched.attemptCount,
+    fallbackUsed: dispatched.fallbackUsed,
+    providerMode: dispatched.providerMode,
+    providerSchemaVersion: GEMINI_TRANSPORT_SCHEMA_VERSION,
+    totalProviderLatencyMs: dispatched.totalElapsedMs,
+    attempts: dispatched.attempts.map((attempt) => ({
+      model: attempt.model,
+      providerMode: attempt.providerMode,
+      upstreamHttpStatus: attempt.upstreamHttpStatus,
+      elapsedMs: attempt.elapsedMs,
+    })),
+  };
+}
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -56,6 +92,7 @@ async function persistControlledFailure(
   callerUserId: string,
   code: string,
   message: string,
+  providerAudit?: SafeProviderAudit,
 ): Promise<void> {
   const { error } = await client
     .from("authentications")
@@ -68,6 +105,7 @@ async function persistControlledFailure(
           message,
           occurredAt: new Date().toISOString(),
           promptVersion: PROMPT_VERSION,
+          ...(providerAudit ? { providerAudit } : {}),
         },
       },
     })
@@ -263,26 +301,31 @@ Deno.serve(async (req) => {
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), GEMINI_TOTAL_TIMEOUT_MS);
     let response: Response;
     let providerElapsedMs = 0;
     let providerMode: GeminiProviderMode = "structured_schema";
+    let providerModel = ANALYSIS_MODEL;
+    let providerAudit: SafeProviderAudit | null = null;
     const providerPipelineStartedAt = performance.now();
     try {
-      const dispatched = await dispatchGeminiAnalysisWithFallback(fetch, apiKey, {
+      const dispatched = await dispatchGeminiAnalysisWithResilience(fetch, apiKey, {
         systemInstruction: systemPrompt,
         prompt: userPrompt,
         imageUrls: providerImageUrls,
         responseJsonSchema: GEMINI_OBSERVATION_TRANSPORT_SCHEMA,
       }, Deno.env.get("GEMINI_API_ENDPOINT") || undefined, controller.signal);
       response = dispatched.response;
-      providerElapsedMs = dispatched.elapsedMs;
+      providerElapsedMs = dispatched.totalElapsedMs;
       providerMode = dispatched.providerMode;
+      providerModel = dispatched.model;
+      providerAudit = safeProviderAudit(dispatched, response.ok);
       if (dispatched.schemaCompilationFailure) {
         const diagnostic = await readGeminiFailureDiagnostic({
           response: dispatched.schemaCompilationFailure.response,
           apiKey,
           elapsedMs: dispatched.schemaCompilationFailure.elapsedMs,
+          model: dispatched.model,
         });
         console.error("Gemini transport schema rejected; JSON fallback enabled:", JSON.stringify(diagnostic));
       }
@@ -305,10 +348,22 @@ Deno.serve(async (req) => {
     }
 
     if (!response.ok) {
-      const diagnostic = await readGeminiFailureDiagnostic({ response, apiKey, elapsedMs: providerElapsedMs });
+      const diagnostic = await readGeminiFailureDiagnostic({
+        response,
+        apiKey,
+        elapsedMs: providerElapsedMs,
+        model: providerModel,
+      });
       console.error("Gemini provider failure:", JSON.stringify(diagnostic));
       const code = diagnostic.internalCode;
-      await persistControlledFailure(serviceClient, authenticationId, callerUserId, code, "The observation provider did not return a usable response.");
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        code,
+        "The observation provider did not return a usable response.",
+        providerAudit || undefined,
+      );
       return jsonResponse({ error: code, message: "Analysis provider unavailable." }, response.status === 429 ? 429 : 502);
     }
 
@@ -316,13 +371,27 @@ Deno.serve(async (req) => {
     try {
       providerResult = await response.json();
     } catch {
-      await persistControlledFailure(serviceClient, authenticationId, callerUserId, "MALFORMED_PROVIDER_RESPONSE", "The observation provider returned an unreadable response.");
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        "MALFORMED_PROVIDER_RESPONSE",
+        "The observation provider returned an unreadable response.",
+        providerAudit || undefined,
+      );
       return jsonResponse({ error: "MALFORMED_PROVIDER_RESPONSE", message: "Analysis provider unavailable." }, 502);
     }
     const structuredResult = extractGeminiStructuredText(providerResult);
     if (!structuredResult.text) {
       const code = structuredResult.refused ? "MODEL_REFUSAL" : "INCOMPLETE_MODEL_OUTPUT";
-      await persistControlledFailure(serviceClient, authenticationId, callerUserId, code, "The model did not return the required structured observation set.");
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        code,
+        "The model did not return the required structured observation set.",
+        providerAudit || undefined,
+      );
       return jsonResponse({ error: code, message: "No assessment verdict was generated." }, 422);
     }
 
@@ -330,22 +399,36 @@ Deno.serve(async (req) => {
     try {
       rawOutput = JSON.parse(structuredResult.text);
     } catch {
-      await persistControlledFailure(serviceClient, authenticationId, callerUserId, "MALFORMED_MODEL_OUTPUT", "The model returned malformed structured data.");
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        "MALFORMED_MODEL_OUTPUT",
+        "The model returned malformed structured data.",
+        providerAudit || undefined,
+      );
       return jsonResponse({ error: "MALFORMED_MODEL_OUTPUT", message: "No assessment verdict was generated." }, 422);
     }
 
     let observationOutput: ReturnType<typeof parseObservationOutput>;
     try {
-      observationOutput = parseObservationOutput(normalizeGeminiTransportOutput(rawOutput));
+      observationOutput = parseObservationOutput(normalizeGeminiTransportOutput(rawOutput, providerModel));
       if (!observationOutput.observations.some((item) => item.code === "IMAGE_QUALITY") ||
           !observationOutput.observations.some((item) => item.code === "IDENTITY_TEXT") ||
           observationOutput.observations.some((item) => item.imageIndex !== null && item.imageIndex >= canonicalEvidence.imageUrls.length) ||
-          observationOutput.observations.some((item) => item.modelVersion !== ANALYSIS_MODEL)) {
+          observationOutput.observations.some((item) => item.modelVersion !== providerModel)) {
         throw new ObservationValidationError("required observation coverage, submitted image traceability, or model version is invalid");
       }
     } catch (error) {
       const code = error instanceof ObservationValidationError ? error.code : "INVALID_MODEL_OUTPUT";
-      await persistControlledFailure(serviceClient, authenticationId, callerUserId, code, "The model response failed strict observation validation.");
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        code,
+        "The model response failed strict observation validation.",
+        providerAudit || undefined,
+      );
       return jsonResponse({ error: code, message: "No assessment verdict was generated." }, 422);
     }
 
@@ -359,12 +442,22 @@ Deno.serve(async (req) => {
           decision: assessment.decision,
           photoCount: canonicalEvidence.imageUrls.length,
           audit: {
-            model: ANALYSIS_MODEL,
+            model: providerModel,
             promptVersion: PROMPT_VERSION,
             decisionEngineVersion: DECISION_ENGINE_VERSION,
             observationSchemaVersion: OBSERVATION_SCHEMA_VERSION,
             providerSchemaVersion: GEMINI_TRANSPORT_SCHEMA_VERSION,
             providerMode,
+            providerAudit: providerAudit || {
+              requestedPrimaryModel: ANALYSIS_MODEL,
+              successfulModel: providerModel,
+              attemptCount: 1,
+              fallbackUsed: false,
+              providerMode,
+              providerSchemaVersion: GEMINI_TRANSPORT_SCHEMA_VERSION,
+              totalProviderLatencyMs: providerElapsedMs,
+              attempts: [],
+            },
             analyzedAt,
             legacyUnverifiedReferencesUsed,
             analysisSource: canonicalEvidence.source,
@@ -379,7 +472,7 @@ Deno.serve(async (req) => {
         p_expected_previous_run_id: latestRunRes.data?.id || null,
         p_completion_token: completionToken,
         p_created_at: analyzedAt,
-        p_model: ANALYSIS_MODEL,
+        p_model: providerModel,
         p_prompt_version: PROMPT_VERSION,
         p_decision_engine_version: DECISION_ENGINE_VERSION,
         p_observation_schema_version: OBSERVATION_SCHEMA_VERSION,

@@ -30,8 +30,8 @@ describe("Phase 1B scoring removal", () => {
     expect(transport).not.toMatch(/finalScore|verdictBand|authenticityScore|referenceConfidence/);
     expect(transport).not.toMatch(/score|probability|verdict/);
     expect(analyze).toContain("Do not return score, verdict, probability, certification, or modelVersion fields");
-    expect(analyze).toContain("normalizeGeminiTransportOutput(rawOutput)");
-    expect(analyze).toContain("parseObservationOutput(normalizeGeminiTransportOutput(rawOutput))");
+    expect(analyze).toContain("normalizeGeminiTransportOutput(rawOutput, providerModel)");
+    expect(analyze).toContain("parseObservationOutput(normalizeGeminiTransportOutput(rawOutput, providerModel))");
     expect(analyze).toContain("const assessment = decideAssessment(observationOutput)");
   });
 });

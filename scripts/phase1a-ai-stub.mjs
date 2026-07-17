@@ -64,7 +64,9 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (request.method !== "POST" || request.url !== "/v1beta/models/gemini-3.5-flash:generateContent") {
+  const isPrimaryModel = request.url === "/v1beta/models/gemini-3.5-flash:generateContent";
+  const isFallbackModel = request.url === "/v1beta/models/gemini-2.5-flash:generateContent";
+  if (request.method !== "POST" || (!isPrimaryModel && !isFallbackModel)) {
     response.writeHead(404).end();
     return;
   }
@@ -129,6 +131,14 @@ const server = createServer(async (request, response) => {
       "x-goog-request-id": "synthetic-request-id",
     });
     response.end(JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "Synthetic provider failure" } }));
+    return;
+  }
+  if (evidenceMarker.includes("stub-primary-unavailable-fallback") && isPrimaryModel) {
+    response.writeHead(503, {
+      "Content-Type": "application/json",
+      "x-goog-request-id": "synthetic-primary-unavailable",
+    });
+    response.end(JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "Synthetic primary outage" } }));
     return;
   }
   if (evidenceMarker.includes("stub-invalid-transport")) {

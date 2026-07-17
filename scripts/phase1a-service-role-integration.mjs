@@ -196,6 +196,26 @@ assert.equal(fallbackRuns[0].decision_engine_version, "popcheck-decision-v1");
 assert.equal(fallbackRuns[0].observation_schema_version, "popcheck-observation-schema-v1");
 assert.equal(fallbackRow.details.assessmentRunId, fallbackRuns[0].id);
 
+await uploadEvidence(owner.userId, "stub-primary-unavailable-fallback.jpg", Buffer.from("stub-primary-unavailable-fallback"));
+const modelFallbackSubmission = await insertSubmission(owner, [
+  `${canonicalSupabaseUrl}/storage/v1/object/public/funko-images/${owner.userId}/stub-primary-unavailable-fallback.jpg`,
+]);
+const modelFallbackCompletion = await invoke(owner, modelFallbackSubmission.id);
+assert.equal(modelFallbackCompletion.response.status, 200);
+assert.equal(modelFallbackCompletion.data.success, true);
+assert.equal(modelFallbackCompletion.data.providerMode, "structured_schema");
+const modelFallbackRow = await serviceRead(modelFallbackSubmission.id);
+const modelFallbackRuns = await serviceReadRuns(modelFallbackSubmission.id);
+assert.equal(modelFallbackRow.status, "completed");
+assert.equal(modelFallbackRow.analysis_model, "gemini-2.5-flash");
+assert.equal(modelFallbackRuns.length, 1);
+assert.equal(modelFallbackRuns[0].model, "gemini-2.5-flash");
+assert.equal(modelFallbackRow.details.audit.providerAudit.requestedPrimaryModel, "gemini-3.5-flash");
+assert.equal(modelFallbackRow.details.audit.providerAudit.successfulModel, "gemini-2.5-flash");
+assert.equal(modelFallbackRow.details.audit.providerAudit.attemptCount, 4);
+assert.equal(modelFallbackRow.details.audit.providerAudit.fallbackUsed, true);
+assert.equal(modelFallbackRow.details.audit.providerAudit.attempts.length, 4);
+
 async function assertControlledProviderFailure(marker, expectedCode, expectedStatus = 422) {
   await uploadEvidence(owner.userId, `${marker}.jpg`, Buffer.from(marker));
   const failureSubmission = await insertSubmission(owner, [
@@ -232,8 +252,8 @@ const stubStatus = await jsonResponse(await fetch(stubUrl));
 assert.equal(stubStatus.response.status, 200);
 assert.equal(
   stubStatus.data.analysisCalls,
-  initialAnalysisCalls + 9,
-  "only completed runs, the one fallback, and controlled provider-failure fixtures may call the Gemini stub",
+  initialAnalysisCalls + 16,
+  "only completed runs, compatibility fallback, model fallback, and controlled provider-failure fixtures may call the Gemini stub",
 );
 
 console.log(JSON.stringify({
@@ -258,5 +278,6 @@ console.log(JSON.stringify({
   transportSchemaAudited: true,
   structuredSchemaModeStored: true,
   jsonFallbackModeStored: true,
+  modelFallbackModeStored: true,
   paidAiCalls: 0,
 }, null, 2));

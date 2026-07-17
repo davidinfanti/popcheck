@@ -1,12 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ANALYSIS_MODEL,
+  FALLBACK_ANALYSIS_MODEL,
   GEMINI_GENERATE_CONTENT_ENDPOINT,
   GeminiEvidenceFetchError,
   dispatchGeminiAnalysis,
   dispatchGeminiAnalysisWithFallback,
+  dispatchGeminiAnalysisWithResilience,
   extractGeminiStructuredText,
 } from "../../supabase/functions/_shared/gemini-provider";
+import {
+  GEMINI_TRANSPORT_NULL,
+  GEMINI_TRANSPORT_SCHEMA_VERSION,
+  normalizeGeminiTransportOutput,
+} from "../../supabase/functions/_shared/gemini-transport";
+import { parseObservationOutput } from "../../supabase/functions/_shared/assessment/contract";
+import { decideAssessment } from "../../supabase/functions/_shared/assessment/decisionEngine";
 import {
   mapGeminiHttpFailure,
   readGeminiFailureDiagnostic,
@@ -28,6 +37,43 @@ const request = {
     additionalProperties: false,
   },
 };
+
+const noDelay = vi.fn(async () => {});
+const unavailable = () => new Response(JSON.stringify({
+  error: { status: "UNAVAILABLE", message: "Transient provider interruption." },
+}), { status: 503 });
+const accepted = () => new Response(JSON.stringify({
+  candidates: [{ finishReason: "STOP", content: { parts: [{ text: "{}" }] } }],
+}), { status: 200 });
+
+function transportFixture() {
+  return {
+    transportVersion: GEMINI_TRANSPORT_SCHEMA_VERSION,
+    candidateIdentity: {
+      popName: "Synthetic Fixture", popNumber: "101", series: GEMINI_TRANSPORT_NULL,
+      barcode: GEMINI_TRANSPORT_NULL, productionCode: GEMINI_TRANSPORT_NULL,
+      factory: GEMINI_TRANSPORT_NULL, releaseYear: GEMINI_TRANSPORT_NULL,
+      sticker: GEMINI_TRANSPORT_NULL, region: GEMINI_TRANSPORT_NULL,
+      copyrightStamp: GEMINI_TRANSPORT_NULL,
+    },
+    observations: [
+      {
+        code: "IMAGE_QUALITY", category: "evidence_quality", findingType: "limitation",
+        observationStatus: "observed", severity: "informational", confidenceLevel: "high",
+        imageIndex: 0, visibleRegion: "front", finding: "The submitted image is visible.",
+        limitation: GEMINI_TRANSPORT_NULL, referenceUsed: GEMINI_TRANSPORT_NULL, referenceReliability: "none",
+      },
+      {
+        code: "IDENTITY_TEXT", category: "identity", findingType: "supporting_consistency",
+        observationStatus: "observed", severity: "informational", confidenceLevel: "high",
+        imageIndex: 0, visibleRegion: "front", finding: "Visible product text is readable.",
+        limitation: GEMINI_TRANSPORT_NULL, referenceUsed: GEMINI_TRANSPORT_NULL, referenceReliability: "none",
+      },
+    ],
+    requestedEvidence: [],
+    limitations: ["Synthetic evidence only."],
+  };
+}
 
 describe("direct Gemini provider adapter", () => {
   it("uses the authoritative model endpoint, inlines images, and sends strict JSON Schema output", async () => {
@@ -173,6 +219,154 @@ describe("direct Gemini provider adapter", () => {
       imageUrls: [],
     })).rejects.toMatchObject({ name: "AbortError" });
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses gemini-3.5-flash on a first-call success with one audited attempt", async () => {
+    const fetcher = vi.fn(async () => accepted());
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { sleep: noDelay, random: () => 0 });
+
+    expect(result).toMatchObject({
+      requestedPrimaryModel: ANALYSIS_MODEL,
+      model: ANALYSIS_MODEL,
+      attemptCount: 1,
+      fallbackUsed: false,
+      providerMode: "structured_schema",
+      attempts: [{ model: ANALYSIS_MODEL, upstreamHttpStatus: 200 }],
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe(GEMINI_GENERATE_CONTENT_ENDPOINT);
+  });
+
+  it("retries the primary model after one Google 503 UNAVAILABLE before succeeding", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(unavailable())
+      .mockResolvedValueOnce(accepted());
+    const sleep = vi.fn(async () => {});
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { sleep, random: () => 0 });
+
+    expect(result.model).toBe(ANALYSIS_MODEL);
+    expect(result.attemptCount).toBe(2);
+    expect(result.fallbackUsed).toBe(false);
+    expect(result.attempts.map((attempt) => attempt.model)).toEqual([ANALYSIS_MODEL, ANALYSIS_MODEL]);
+    expect(sleep).toHaveBeenCalledWith(1_000, undefined);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to gemini-2.5-flash only after three Google 503 UNAVAILABLE primary attempts", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(unavailable())
+      .mockResolvedValueOnce(unavailable())
+      .mockResolvedValueOnce(unavailable())
+      .mockResolvedValueOnce(accepted());
+    const sleep = vi.fn(async () => {});
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { sleep, random: () => 0 });
+
+    expect(result).toMatchObject({
+      model: FALLBACK_ANALYSIS_MODEL,
+      attemptCount: 4,
+      fallbackUsed: true,
+      attempts: [
+        { model: ANALYSIS_MODEL, upstreamHttpStatus: 503 },
+        { model: ANALYSIS_MODEL, upstreamHttpStatus: 503 },
+        { model: ANALYSIS_MODEL, upstreamHttpStatus: 503 },
+        { model: FALLBACK_ANALYSIS_MODEL, upstreamHttpStatus: 200 },
+      ],
+    });
+    expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1_000, 2_000]);
+    expect(fetcher.mock.calls[3][0]).toContain(`/models/${FALLBACK_ANALYSIS_MODEL}:generateContent`);
+  });
+
+  it("returns one final controlled unavailable response after all permitted attempts", async () => {
+    const fetcher = vi.fn(async () => unavailable());
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { sleep: noDelay, random: () => 0 });
+
+    expect(result.response.status).toBe(503);
+    expect(result.attemptCount).toBe(4);
+    expect(result.fallbackUsed).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    [400, "INVALID_ARGUMENT"],
+    [401, "UNAUTHENTICATED"],
+    [403, "PERMISSION_DENIED"],
+    [404, "NOT_FOUND"],
+    [429, "RESOURCE_EXHAUSTED"],
+    [503, "INTERNAL"],
+  ])("never retries or changes models for HTTP %s", async (status, googleStatus) => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      error: { status: googleStatus, message: "Non-retryable provider response." },
+    }), { status }));
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { sleep: noDelay, random: () => 0 });
+
+    expect(result.attemptCount).toBe(1);
+    expect(result.fallbackUsed).toBe(false);
+    expect(result.model).toBe(ANALYSIS_MODEL);
+    // A 400 INVALID_ARGUMENT may still use the pre-existing same-model JSON
+    // transport compatibility path. It never causes a retry or model switch.
+    expect(fetcher).toHaveBeenCalledTimes(status === 400 ? 2 : 1);
+  });
+
+  it("does not switch models for invalid structured output, and fallback output remains strictly validated", async () => {
+    const fetcher = vi.fn(async () => accepted());
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { sleep: noDelay, random: () => 0 });
+    expect(result.attemptCount).toBe(1);
+    expect(result.model).toBe(ANALYSIS_MODEL);
+    expect(() => parseObservationOutput(normalizeGeminiTransportOutput({}, result.model))).toThrow();
+
+    const fallbackOutput = parseObservationOutput(
+      normalizeGeminiTransportOutput(transportFixture(), FALLBACK_ANALYSIS_MODEL),
+    );
+    expect(fallbackOutput.observations.every((item) => item.modelVersion === FALLBACK_ANALYSIS_MODEL)).toBe(true);
+    expect(decideAssessment(fallbackOutput).decision.verdictClass).toBe("no_material_anomaly_detected");
+  });
+
+  it("keeps attempt metadata free of keys, prompts, and image payloads", async () => {
+    const apiKey = "server-only-key";
+    const privateImageUrl = "https://evidence.example/private-image.png";
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      if (input === privateImageUrl) {
+        return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+          status: 200,
+          headers: { "Content-Type": "image/png" },
+        });
+      }
+      return unavailable();
+    });
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, apiKey, {
+      ...request,
+      prompt: "Private prompt content",
+      imageUrls: [privateImageUrl],
+    }, undefined, undefined, { sleep: noDelay, random: () => 0 });
+
+    const audit = JSON.stringify({
+      requestedPrimaryModel: result.requestedPrimaryModel,
+      model: result.model,
+      attemptCount: result.attemptCount,
+      fallbackUsed: result.fallbackUsed,
+      attempts: result.attempts,
+    });
+    expect(audit).not.toContain(apiKey);
+    expect(audit).not.toContain(privateImageUrl);
+    expect(audit).not.toContain("Private prompt content");
   });
 
   it("maps every provider HTTP failure to a distinct safe internal code", () => {

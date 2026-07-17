@@ -1,6 +1,12 @@
 export const ANALYSIS_MODEL = "gemini-3.5-flash";
-export const GEMINI_GENERATE_CONTENT_ENDPOINT =
-  `https://generativelanguage.googleapis.com/v1beta/models/${ANALYSIS_MODEL}:generateContent`;
+export const FALLBACK_ANALYSIS_MODEL = "gemini-2.5-flash";
+export const GEMINI_TOTAL_TIMEOUT_MS = 30_000;
+
+export function geminiGenerateContentEndpoint(model: string): string {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+}
+
+export const GEMINI_GENERATE_CONTENT_ENDPOINT = geminiGenerateContentEndpoint(ANALYSIS_MODEL);
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 14 * 1024 * 1024;
@@ -24,6 +30,7 @@ export interface GeminiAnalysisRequest {
   imageUrls: string[];
   responseJsonSchema: Record<string, unknown>;
   providerMode?: GeminiProviderMode;
+  model?: string;
 }
 
 export interface GeminiDispatchResult {
@@ -34,6 +41,30 @@ export interface GeminiDispatchResult {
 export interface GeminiCompatibilityDispatchResult extends GeminiDispatchResult {
   providerMode: GeminiProviderMode;
   schemaCompilationFailure: GeminiDispatchResult | null;
+}
+
+export interface GeminiProviderAttempt {
+  model: string;
+  providerMode: GeminiProviderMode;
+  upstreamHttpStatus: number;
+  elapsedMs: number;
+}
+
+export interface GeminiResilientDispatchResult extends GeminiCompatibilityDispatchResult {
+  requestedPrimaryModel: string;
+  model: string;
+  attemptCount: number;
+  fallbackUsed: boolean;
+  totalElapsedMs: number;
+  attempts: GeminiProviderAttempt[];
+}
+
+export interface GeminiResilienceOptions {
+  primaryModel?: string;
+  fallbackModel?: string;
+  totalTimeoutMs?: number;
+  random?: () => number;
+  sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 }
 
 export class GeminiEvidenceFetchError extends Error {
@@ -103,7 +134,7 @@ export async function dispatchGeminiAnalysis(
   fetcher: FetchLike,
   apiKey: string,
   request: GeminiAnalysisRequest,
-  endpoint = GEMINI_GENERATE_CONTENT_ENDPOINT,
+  endpoint?: string,
   signal?: AbortSignal,
 ): Promise<GeminiDispatchResult> {
   const parts: Array<Record<string, unknown>> = [{ text: request.prompt }];
@@ -126,7 +157,8 @@ export async function dispatchGeminiAnalysis(
           },
         },
       };
-  const response = await fetcher(endpoint, {
+  const model = request.model || ANALYSIS_MODEL;
+  const response = await fetcher(resolveModelEndpoint(model, endpoint), {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,
@@ -140,6 +172,14 @@ export async function dispatchGeminiAnalysis(
     signal,
   });
   return { response, elapsedMs: Math.round(performance.now() - startedAt) };
+}
+
+function resolveModelEndpoint(model: string, endpoint?: string): string {
+  if (!endpoint) return geminiGenerateContentEndpoint(model);
+  return endpoint.replace(
+    /\/models\/[^/:]+:generateContent(?:\?[^#]*)?$/,
+    `/models/${model}:generateContent`,
+  );
 }
 
 async function isSchemaCompilationFailure(response: Response): Promise<boolean> {
@@ -156,7 +196,7 @@ export async function dispatchGeminiAnalysisWithFallback(
   fetcher: FetchLike,
   apiKey: string,
   request: GeminiAnalysisRequest,
-  endpoint = GEMINI_GENERATE_CONTENT_ENDPOINT,
+  endpoint?: string,
   signal?: AbortSignal,
 ): Promise<GeminiCompatibilityDispatchResult> {
   const structured = await dispatchGeminiAnalysis(
@@ -183,6 +223,113 @@ export async function dispatchGeminiAnalysisWithFallback(
     providerMode: "json_fallback",
     schemaCompilationFailure: structured,
   };
+}
+
+async function hasGoogleUnavailableStatus(response: Response): Promise<boolean> {
+  if (response.status !== 503) return false;
+  try {
+    const payload: unknown = await response.clone().json();
+    const error = isRecord(payload) && isRecord(payload.error) ? payload.error : null;
+    return error?.status === "UNAVAILABLE";
+  } catch {
+    return false;
+  }
+}
+
+function defaultSleep(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("aborted", "AbortError"));
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", aborted);
+      resolve();
+    }, delayMs);
+    const aborted = () => {
+      clearTimeout(timeout);
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", aborted, { once: true });
+  });
+}
+
+/**
+ * Retries only the documented Google 503/UNAVAILABLE condition.  Schema
+ * compatibility fallback remains scoped to a 400 schema-compilation failure;
+ * it is not a model failover mechanism.
+ */
+export async function dispatchGeminiAnalysisWithResilience(
+  fetcher: FetchLike,
+  apiKey: string,
+  request: GeminiAnalysisRequest,
+  endpoint?: string,
+  signal?: AbortSignal,
+  options: GeminiResilienceOptions = {},
+): Promise<GeminiResilientDispatchResult> {
+  const primaryModel = options.primaryModel || ANALYSIS_MODEL;
+  const fallbackModel = options.fallbackModel || FALLBACK_ANALYSIS_MODEL;
+  const totalTimeoutMs = options.totalTimeoutMs || GEMINI_TOTAL_TIMEOUT_MS;
+  const random = options.random || Math.random;
+  const sleep = options.sleep || defaultSleep;
+  const startedAt = performance.now();
+  const attempts: GeminiProviderAttempt[] = [];
+
+  const dispatchAttempt = async (model: string): Promise<GeminiCompatibilityDispatchResult> => {
+    const dispatched = await dispatchGeminiAnalysisWithFallback(
+      fetcher,
+      apiKey,
+      { ...request, model },
+      endpoint,
+      signal,
+    );
+    attempts.push({
+      model,
+      providerMode: dispatched.providerMode,
+      upstreamHttpStatus: dispatched.response.status,
+      elapsedMs: dispatched.elapsedMs,
+    });
+    return dispatched;
+  };
+
+  const complete = (
+    dispatched: GeminiCompatibilityDispatchResult,
+    model: string,
+    fallbackUsed: boolean,
+  ): GeminiResilientDispatchResult => ({
+    ...dispatched,
+    requestedPrimaryModel: primaryModel,
+    model,
+    attemptCount: attempts.length,
+    fallbackUsed,
+    totalElapsedMs: Math.round(performance.now() - startedAt),
+    attempts,
+  });
+
+  let latestPrimary: GeminiCompatibilityDispatchResult | null = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    latestPrimary = await dispatchAttempt(primaryModel);
+    if (!await hasGoogleUnavailableStatus(latestPrimary.response)) {
+      return complete(latestPrimary, primaryModel, false);
+    }
+
+    if (attempt === 2) break;
+    const baseDelayMs = 1_000 * (2 ** attempt);
+    const delayMs = baseDelayMs + Math.floor(random() * 251);
+    if (performance.now() - startedAt + delayMs >= totalTimeoutMs) {
+      return complete(latestPrimary, primaryModel, false);
+    }
+    await sleep(delayMs, signal);
+    if (performance.now() - startedAt >= totalTimeoutMs) {
+      return complete(latestPrimary, primaryModel, false);
+    }
+  }
+
+  // The fallback is intentionally unavailable for every other provider or
+  // validation condition, including quota exhaustion and malformed output.
+  if (!latestPrimary || performance.now() - startedAt >= totalTimeoutMs) {
+    if (!latestPrimary) throw new Error("Gemini dispatch did not produce a response.");
+    return complete(latestPrimary, primaryModel, false);
+  }
+  const fallback = await dispatchAttempt(fallbackModel);
+  return complete(fallback, fallbackModel, true);
 }
 
 export function extractGeminiStructuredText(value: unknown): { text: string | null; refused: boolean } {

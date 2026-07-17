@@ -93,7 +93,10 @@ function stringArray(value: unknown, path: string): string[] {
   return value.map((item, index) => requiredString(item, `${path}[${index}]`));
 }
 
-export function normalizeGeminiTransportOutput(value: unknown): Record<string, unknown> {
+export function normalizeGeminiTransportOutput(
+  value: unknown,
+  model = ANALYSIS_MODEL,
+): Record<string, unknown> {
   if (!isRecord(value)) throw new ObservationValidationError("Gemini transport output must be an object");
   assertExactKeys(
     value,
@@ -135,7 +138,9 @@ export function normalizeGeminiTransportOutput(value: unknown): Record<string, u
       limitation: nullableTransportString(item.limitation, `observations[${index}].limitation`),
       referenceUsed: nullableTransportString(item.referenceUsed, `observations[${index}].referenceUsed`),
       referenceReliability: requiredString(item.referenceReliability, `observations[${index}].referenceReliability`),
-      modelVersion: ANALYSIS_MODEL,
+      // The model never supplies this field. The server stamps the actual
+      // successful provider model before authoritative validation.
+      modelVersion: model,
     };
   });
 
