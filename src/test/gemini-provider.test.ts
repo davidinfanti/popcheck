@@ -53,7 +53,7 @@ describe("direct Gemini provider adapter", () => {
     expect(body.contents[0].parts[1]).toEqual({
       inlineData: { mimeType: "image/png", data: "iVBORw==" },
     });
-    expect(body.generationConfig.responseFormat.text.mimeType).toBe("application/json");
+    expect(body.generationConfig.responseFormat.text.mimeType).toBe("APPLICATION_JSON");
     expect(body.generationConfig.responseFormat.text.schema).toEqual({
       type: "object",
       properties: { finding: { type: "string" } },

@@ -154,7 +154,7 @@ function requestBody(
       ? {
           generationConfig: {
             responseFormat: {
-              text: { mimeType: "application/json", schema: toGeminiJsonSchema(schema) },
+              text: { mimeType: "APPLICATION_JSON", schema: toGeminiJsonSchema(schema) },
             },
           },
         }

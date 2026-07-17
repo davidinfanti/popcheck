@@ -121,7 +121,7 @@ export async function dispatchGeminiAnalysis(
       generationConfig: {
         responseFormat: {
           text: {
-            mimeType: "application/json",
+            mimeType: "APPLICATION_JSON",
             schema: toGeminiJsonSchema(request.responseJsonSchema),
           },
         },

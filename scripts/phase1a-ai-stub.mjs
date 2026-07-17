@@ -80,7 +80,7 @@ const server = createServer(async (request, response) => {
 
   if (
     typeof request.headers["x-goog-api-key"] !== "string" ||
-    body?.generationConfig?.responseFormat?.text?.mimeType !== "application/json" ||
+    body?.generationConfig?.responseFormat?.text?.mimeType !== "APPLICATION_JSON" ||
     body?.generationConfig?.responseFormat?.text?.schema?.properties?.schemaVersion?.enum?.[0] !== "popcheck-observation-schema-v1" ||
     !body?.systemInstruction?.parts?.[0]?.text?.includes("POPCHECK observation extractor") ||
     !Array.isArray(parts) ||
