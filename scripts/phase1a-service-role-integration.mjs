@@ -137,6 +137,7 @@ assert.equal(
   `analysis invocation failed with ${completed.response.status}: ${JSON.stringify(completed.data)}`,
 );
 assert.equal(completed.data.success, true);
+assert.equal(completed.data.providerMode, "structured_schema");
 
 const completedRow = await serviceRead(submission.id);
 assert.equal(completedRow.status, "completed");
@@ -150,6 +151,9 @@ assert.equal(completedRow.legacy_unverified_references_used, false);
 assert(completedRow.analyzed_at);
 assert.equal(completedRow.details.audit.analysisSource, "physical_scan");
 assert.equal(completedRow.details.audit.decisionEngineVersion, "popcheck-decision-v1");
+assert.equal(completedRow.details.audit.observationSchemaVersion, "popcheck-observation-schema-v1");
+assert.equal(completedRow.details.audit.providerSchemaVersion, "gemini-observation-transport-v1");
+assert.equal(completedRow.details.audit.providerMode, "structured_schema");
 
 const firstRuns = await serviceReadRuns(submission.id);
 assert.equal(firstRuns.length, 1);
@@ -171,6 +175,27 @@ assert.equal(repeatedRuns[0].id, firstRuns[0].id, "the earlier run must remain u
 assert.notEqual(repeatedRuns[1].id, repeatedRuns[0].id);
 assert.equal(completedRow.details.audit.structuredGuidanceVersionId, null);
 
+await uploadEvidence(owner.userId, "stub-schema-compile.jpg", Buffer.from("stub-schema-compile"));
+const fallbackSubmission = await insertSubmission(owner, [
+  `${canonicalSupabaseUrl}/storage/v1/object/public/funko-images/${owner.userId}/stub-schema-compile.jpg`,
+]);
+const fallbackCompletion = await invoke(owner, fallbackSubmission.id);
+assert.equal(fallbackCompletion.response.status, 200);
+assert.equal(fallbackCompletion.data.success, true);
+assert.equal(fallbackCompletion.data.providerMode, "json_fallback");
+const fallbackRow = await serviceRead(fallbackSubmission.id);
+const fallbackRuns = await serviceReadRuns(fallbackSubmission.id);
+assert.equal(fallbackRow.status, "completed");
+assert.equal(fallbackRow.score, null);
+assert.equal(fallbackRow.details.audit.providerMode, "json_fallback");
+assert.equal(fallbackRow.details.audit.providerSchemaVersion, "gemini-observation-transport-v1");
+assert.equal(fallbackRuns.length, 1);
+assert.equal(fallbackRuns[0].model, "gemini-3.5-flash");
+assert.equal(fallbackRuns[0].prompt_version, "popcheck-observation-v1");
+assert.equal(fallbackRuns[0].decision_engine_version, "popcheck-decision-v1");
+assert.equal(fallbackRuns[0].observation_schema_version, "popcheck-observation-schema-v1");
+assert.equal(fallbackRow.details.assessmentRunId, fallbackRuns[0].id);
+
 async function assertControlledProviderFailure(marker, expectedCode, expectedStatus = 422) {
   await uploadEvidence(owner.userId, `${marker}.jpg`, Buffer.from(marker));
   const failureSubmission = await insertSubmission(owner, [
@@ -190,6 +215,7 @@ await assertControlledProviderFailure("stub-refusal", "MODEL_REFUSAL");
 await assertControlledProviderFailure("stub-incomplete", "INCOMPLETE_MODEL_OUTPUT");
 await assertControlledProviderFailure("stub-malformed", "MALFORMED_MODEL_OUTPUT");
 await assertControlledProviderFailure("stub-provider-error", "PROVIDER_UNAVAILABLE", 502);
+await assertControlledProviderFailure("stub-invalid-transport", "INVALID_MODEL_OUTPUT");
 
 const rejectedSubmission = await insertSubmission(owner, ["https://attacker.example/private.jpg"]);
 const rejected = await invoke(owner, rejectedSubmission.id);
@@ -206,8 +232,8 @@ const stubStatus = await jsonResponse(await fetch(stubUrl));
 assert.equal(stubStatus.response.status, 200);
 assert.equal(
   stubStatus.data.analysisCalls,
-  initialAnalysisCalls + 6,
-  "only the two completed runs and four controlled provider-failure fixtures may call the Gemini stub",
+  initialAnalysisCalls + 9,
+  "only completed runs, the one fallback, and controlled provider-failure fixtures may call the Gemini stub",
 );
 
 console.log(JSON.stringify({
@@ -228,5 +254,9 @@ console.log(JSON.stringify({
   incompleteOutputFailedSafely: true,
   malformedOutputFailedSafely: true,
   providerErrorFailedSafely: true,
+  invalidTransportFailedSafely: true,
+  transportSchemaAudited: true,
+  structuredSchemaModeStored: true,
+  jsonFallbackModeStored: true,
   paidAiCalls: 0,
 }, null, 2));

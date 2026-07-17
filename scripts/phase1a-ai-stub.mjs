@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 54329);
 let analysisCalls = 0;
+const transportNull = "__POPCHECK_NULL__";
 
 const baseObservation = {
   findingType: "supporting_consistency",
@@ -9,25 +10,24 @@ const baseObservation = {
   severity: "informational",
   confidenceLevel: "high",
   imageIndex: 0,
-  limitation: null,
-  referenceUsed: null,
+  limitation: transportNull,
+  referenceUsed: transportNull,
   referenceReliability: "none",
-  modelVersion: "gemini-3.5-flash",
 };
 
 const observationOutput = {
-  schemaVersion: "popcheck-observation-schema-v1",
+  transportVersion: "gemini-observation-transport-v1",
   candidateIdentity: {
     popName: "Integration Fixture",
     popNumber: "101",
     series: "Animation",
-    barcode: null,
-    productionCode: null,
-    factory: null,
-    releaseYear: null,
-    sticker: null,
-    region: null,
-    copyrightStamp: null,
+    barcode: transportNull,
+    productionCode: transportNull,
+    factory: transportNull,
+    releaseYear: transportNull,
+    sticker: transportNull,
+    region: transportNull,
+    copyrightStamp: transportNull,
   },
   observations: [
     {
@@ -77,11 +77,17 @@ const server = createServer(async (request, response) => {
     ? parts.find((part) => typeof part?.inlineData?.data === "string")?.inlineData?.data
     : null;
   const evidenceMarker = encodedEvidence ? Buffer.from(encodedEvidence, "base64").toString("utf8") : "";
+  const structuredSchemaMode =
+    body?.generationConfig?.responseFormat?.text?.mimeType === "APPLICATION_JSON" &&
+    body?.generationConfig?.responseFormat?.text?.schema?.properties?.transportVersion?.enum?.[0] ===
+      "gemini-observation-transport-v1";
+  const jsonFallbackMode =
+    body?.generationConfig?.responseMimeType === "application/json" &&
+    body?.generationConfig?.responseFormat === undefined;
 
   if (
     typeof request.headers["x-goog-api-key"] !== "string" ||
-    body?.generationConfig?.responseFormat?.text?.mimeType !== "APPLICATION_JSON" ||
-    body?.generationConfig?.responseFormat?.text?.schema?.properties?.schemaVersion?.enum?.[0] !== "popcheck-observation-schema-v1" ||
+    (!structuredSchemaMode && !jsonFallbackMode) ||
     !body?.systemInstruction?.parts?.[0]?.text?.includes("POPCHECK observation extractor") ||
     !Array.isArray(parts) ||
     !encodedEvidence ||
@@ -95,6 +101,13 @@ const server = createServer(async (request, response) => {
   }
 
   analysisCalls += 1;
+  if (evidenceMarker.includes("stub-schema-compile") && structuredSchemaMode) {
+    response.writeHead(400, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      error: { code: 400, status: "INVALID_ARGUMENT", message: "Synthetic transport schema rejection" },
+    }));
+    return;
+  }
   if (evidenceMarker.includes("stub-refusal")) {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ promptFeedback: { blockReason: "SAFETY" } }));
@@ -116,6 +129,16 @@ const server = createServer(async (request, response) => {
       "x-goog-request-id": "synthetic-request-id",
     });
     response.end(JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "Synthetic provider failure" } }));
+    return;
+  }
+  if (evidenceMarker.includes("stub-invalid-transport")) {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      candidates: [{
+        finishReason: "STOP",
+        content: { parts: [{ text: JSON.stringify({ ...observationOutput, score: 99, verdict: "pass" }) }] },
+      }],
+    }));
     return;
   }
   response.writeHead(200, { "Content-Type": "application/json" });

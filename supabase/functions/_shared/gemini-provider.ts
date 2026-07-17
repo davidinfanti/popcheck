@@ -16,17 +16,24 @@ const REFUSAL_FINISH_REASONS = new Set([
 const UNSUPPORTED_JSON_SCHEMA_KEYS = new Set(["minLength", "maxLength"]);
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export type GeminiProviderMode = "structured_schema" | "json_fallback";
 
 export interface GeminiAnalysisRequest {
   systemInstruction: string;
   prompt: string;
   imageUrls: string[];
   responseJsonSchema: Record<string, unknown>;
+  providerMode?: GeminiProviderMode;
 }
 
 export interface GeminiDispatchResult {
   response: Response;
   elapsedMs: number;
+}
+
+export interface GeminiCompatibilityDispatchResult extends GeminiDispatchResult {
+  providerMode: GeminiProviderMode;
+  schemaCompilationFailure: GeminiDispatchResult | null;
 }
 
 export class GeminiEvidenceFetchError extends Error {
@@ -109,6 +116,16 @@ export async function dispatchGeminiAnalysis(
   }
 
   const startedAt = performance.now();
+  const generationConfig = request.providerMode === "json_fallback"
+    ? { responseMimeType: "application/json" }
+    : {
+        responseFormat: {
+          text: {
+            mimeType: "APPLICATION_JSON",
+            schema: toGeminiJsonSchema(request.responseJsonSchema),
+          },
+        },
+      };
   const response = await fetcher(endpoint, {
     method: "POST",
     headers: {
@@ -118,18 +135,54 @@ export async function dispatchGeminiAnalysis(
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: request.systemInstruction }] },
       contents: [{ role: "user", parts }],
-      generationConfig: {
-        responseFormat: {
-          text: {
-            mimeType: "APPLICATION_JSON",
-            schema: toGeminiJsonSchema(request.responseJsonSchema),
-          },
-        },
-      },
+      generationConfig,
     }),
     signal,
   });
   return { response, elapsedMs: Math.round(performance.now() - startedAt) };
+}
+
+async function isSchemaCompilationFailure(response: Response): Promise<boolean> {
+  if (response.status !== 400) return false;
+  try {
+    const payload: unknown = await response.clone().json();
+    return isRecord(payload) && isRecord(payload.error) && payload.error.status === "INVALID_ARGUMENT";
+  } catch {
+    return false;
+  }
+}
+
+export async function dispatchGeminiAnalysisWithFallback(
+  fetcher: FetchLike,
+  apiKey: string,
+  request: GeminiAnalysisRequest,
+  endpoint = GEMINI_GENERATE_CONTENT_ENDPOINT,
+  signal?: AbortSignal,
+): Promise<GeminiCompatibilityDispatchResult> {
+  const structured = await dispatchGeminiAnalysis(
+    fetcher,
+    apiKey,
+    { ...request, providerMode: "structured_schema" },
+    endpoint,
+    signal,
+  );
+  if (!await isSchemaCompilationFailure(structured.response)) {
+    return { ...structured, providerMode: "structured_schema", schemaCompilationFailure: null };
+  }
+
+  const fallback = await dispatchGeminiAnalysis(
+    fetcher,
+    apiKey,
+    { ...request, providerMode: "json_fallback" },
+    endpoint,
+    signal,
+  );
+  return {
+    response: fallback.response,
+    elapsedMs: structured.elapsedMs + fallback.elapsedMs,
+    providerMode: "json_fallback",
+    schemaCompilationFailure: structured,
+  };
 }
 
 export function extractGeminiStructuredText(value: unknown): { text: string | null; refused: boolean } {

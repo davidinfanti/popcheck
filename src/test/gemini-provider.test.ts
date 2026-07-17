@@ -4,6 +4,7 @@ import {
   GEMINI_GENERATE_CONTENT_ENDPOINT,
   GeminiEvidenceFetchError,
   dispatchGeminiAnalysis,
+  dispatchGeminiAnalysisWithFallback,
   extractGeminiStructuredText,
 } from "../../supabase/functions/_shared/gemini-provider";
 import {
@@ -105,6 +106,73 @@ describe("direct Gemini provider adapter", () => {
       "server-only-key",
       request,
     )).rejects.toMatchObject({ code: "PROVIDER_EVIDENCE_FETCH" });
+  });
+
+  it("falls back once to schema-less JSON only after a 400 INVALID_ARGUMENT compilation failure", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { status: "INVALID_ARGUMENT", message: "Schema compilation failed." },
+      }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ candidates: [] }), { status: 200 }));
+
+    const result = await dispatchGeminiAnalysisWithFallback(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    });
+
+    expect(result.providerMode).toBe("json_fallback");
+    expect(result.response.status).toBe(200);
+    expect(result.schemaCompilationFailure?.response.status).toBe(400);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    const structuredBody = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    const fallbackBody = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    expect(structuredBody.generationConfig.responseFormat.text.schema).toBeDefined();
+    expect(fallbackBody.generationConfig).toEqual({ responseMimeType: "application/json" });
+    expect(fallbackBody.generationConfig).not.toHaveProperty("responseFormat");
+    expect(fallbackBody.systemInstruction).toEqual(structuredBody.systemInstruction);
+    expect(fallbackBody.contents).toEqual(structuredBody.contents);
+  });
+
+  it.each([401, 403, 404, 429, 500, 503, 504])(
+    "does not use JSON fallback after provider HTTP %s",
+    async (status) => {
+      const googleStatus = status === 404 ? "NOT_FOUND" : status === 429 ? "RESOURCE_EXHAUSTED" : "UNAVAILABLE";
+      const fetcher = vi.fn(async () => new Response(JSON.stringify({
+        error: { status: googleStatus, message: "Controlled provider failure." },
+      }), { status }));
+
+      const result = await dispatchGeminiAnalysisWithFallback(fetcher, "server-only-key", {
+        ...request,
+        imageUrls: [],
+      });
+      expect(result.providerMode).toBe("structured_schema");
+      expect(result.response.status).toBe(status);
+      expect(result.schemaCompilationFailure).toBeNull();
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("does not use JSON fallback for a non-compilation HTTP 400", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      error: { status: "FAILED_PRECONDITION", message: "Not a schema compilation failure." },
+    }), { status: 400 }));
+    const result = await dispatchGeminiAnalysisWithFallback(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    });
+    expect(result.providerMode).toBe("structured_schema");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a timeout", async () => {
+    const fetcher = vi.fn(async () => {
+      throw new DOMException("aborted", "AbortError");
+    });
+    await expect(dispatchGeminiAnalysisWithFallback(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it("maps every provider HTTP failure to a distinct safe internal code", () => {
