@@ -7,6 +7,11 @@ import {
   extractGeminiStructuredText,
 } from "../_shared/gemini-provider.ts";
 import {
+  readGeminiFailureDiagnostic,
+  runGeminiIsolationProbes,
+  timeoutDiagnostic,
+} from "../_shared/gemini-diagnostics.ts";
+import {
   CONFIDENCE_LEVELS,
   DECISION_ENGINE_VERSION,
   FINDING_TYPES,
@@ -139,6 +144,18 @@ const observationTool = {
   },
 };
 
+function validateProbeObservationOutput(text: string, submittedImageCount: number): boolean {
+  try {
+    const output = parseObservationOutput(JSON.parse(text));
+    return output.observations.some((item) => item.code === "IMAGE_QUALITY") &&
+      output.observations.some((item) => item.code === "IDENTITY_TEXT") &&
+      output.observations.every((item) => item.modelVersion === ANALYSIS_MODEL) &&
+      output.observations.every((item) => item.imageIndex === null || item.imageIndex < submittedImageCount);
+  } catch {
+    return false;
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -157,6 +174,40 @@ Deno.serve(async (req) => {
     const callerUserId = claimsData.claims.sub as string;
 
     const requestBody = await req.json();
+    if (requestBody?.operatorAction === "probe_gemini_provider") {
+      if (claimsData.claims.role !== "service_role") return jsonResponse({ error: "Forbidden" }, 403);
+      const apiKey = Deno.env.get("GEMINI_API_KEY");
+      const syntheticImageUrl = requestBody?.syntheticImageUrl;
+      const syntheticOwnerId = requestBody?.syntheticOwnerId;
+      if (!apiKey || typeof syntheticImageUrl !== "string" || typeof syntheticOwnerId !== "string") {
+        return jsonResponse({ error: "Diagnostic unavailable" }, 503);
+      }
+      try {
+        resolveCanonicalEvidence({
+          canonicalUrls: [syntheticImageUrl],
+          userId: syntheticOwnerId,
+          supabaseUrl,
+        });
+      } catch {
+        return jsonResponse({ error: "Invalid synthetic diagnostic evidence" }, 400);
+      }
+      const probes = await runGeminiIsolationProbes({
+        fetcher: fetch,
+        apiKey,
+        syntheticImageUrl,
+        fullSchema: observationTool.function.parameters,
+        fullSystemInstruction: buildObservationPrompt({
+          source: "physical_scan",
+          submittedImageCount: 1,
+          referenceNotes: [],
+          guidance: null,
+        }),
+        validateFullOutput: validateProbeObservationOutput,
+      });
+      const firstFailure = probes.find((probe) => probe.result === "FAIL");
+      if (firstFailure) console.error("Gemini provider probe failure:", JSON.stringify(firstFailure));
+      return jsonResponse({ success: !firstFailure, probes });
+    }
     const authenticationId = requestBody?.authenticationId;
     if (typeof authenticationId !== "string" || !authenticationId) {
       return jsonResponse({ error: "authenticationId is required" }, 400);
@@ -260,16 +311,22 @@ Deno.serve(async (req) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS);
     let response: Response;
+    let providerElapsedMs = 0;
+    const providerPipelineStartedAt = performance.now();
     try {
-      response = await dispatchGeminiAnalysis(fetch, apiKey, {
+      const dispatched = await dispatchGeminiAnalysis(fetch, apiKey, {
         systemInstruction: systemPrompt,
         prompt: userPrompt,
         imageUrls: providerImageUrls,
         responseJsonSchema: observationTool.function.parameters,
       }, Deno.env.get("GEMINI_API_ENDPOINT") || undefined, controller.signal);
+      response = dispatched.response;
+      providerElapsedMs = dispatched.elapsedMs;
     } catch (error) {
       clearTimeout(timeout);
       if (error instanceof DOMException && error.name === "AbortError") {
+        const diagnostic = timeoutDiagnostic(Math.round(performance.now() - providerPipelineStartedAt));
+        console.error("Gemini provider failure:", JSON.stringify(diagnostic));
         await persistControlledFailure(serviceClient, authenticationId, callerUserId, "PROVIDER_TIMEOUT", "The observation provider timed out before returning a complete response.");
         return jsonResponse({ error: "PROVIDER_TIMEOUT", message: "Analysis timed out." }, 504);
       }
@@ -284,11 +341,9 @@ Deno.serve(async (req) => {
     }
 
     if (!response.ok) {
-      const code = response.status === 429
-        ? "PROVIDER_RATE_LIMIT"
-        : response.status === 401 || response.status === 403
-        ? "PROVIDER_AUTH"
-        : "PROVIDER_ERROR";
+      const diagnostic = await readGeminiFailureDiagnostic({ response, apiKey, elapsedMs: providerElapsedMs });
+      console.error("Gemini provider failure:", JSON.stringify(diagnostic));
+      const code = diagnostic.internalCode;
       await persistControlledFailure(serviceClient, authenticationId, callerUserId, code, "The observation provider did not return a usable response.");
       return jsonResponse({ error: code, message: "Analysis provider unavailable." }, response.status === 429 ? 429 : 502);
     }

@@ -189,7 +189,7 @@ async function assertControlledProviderFailure(marker, expectedCode, expectedSta
 await assertControlledProviderFailure("stub-refusal", "MODEL_REFUSAL");
 await assertControlledProviderFailure("stub-incomplete", "INCOMPLETE_MODEL_OUTPUT");
 await assertControlledProviderFailure("stub-malformed", "MALFORMED_MODEL_OUTPUT");
-await assertControlledProviderFailure("stub-provider-error", "PROVIDER_ERROR", 502);
+await assertControlledProviderFailure("stub-provider-error", "PROVIDER_UNAVAILABLE", 502);
 
 const rejectedSubmission = await insertSubmission(owner, ["https://attacker.example/private.jpg"]);
 const rejected = await invoke(owner, rejectedSubmission.id);

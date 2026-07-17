@@ -24,6 +24,11 @@ export interface GeminiAnalysisRequest {
   responseJsonSchema: Record<string, unknown>;
 }
 
+export interface GeminiDispatchResult {
+  response: Response;
+  elapsedMs: number;
+}
+
 export class GeminiEvidenceFetchError extends Error {
   readonly code = "PROVIDER_EVIDENCE_FETCH";
 
@@ -46,13 +51,13 @@ function base64Encode(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function providerJsonSchema(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(providerJsonSchema);
+export function toGeminiJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(toGeminiJsonSchema);
   if (!isRecord(value)) return value;
   return Object.fromEntries(
     Object.entries(value)
       .filter(([key]) => !UNSUPPORTED_JSON_SCHEMA_KEYS.has(key))
-      .map(([key, nested]) => [key, providerJsonSchema(nested)]),
+      .map(([key, nested]) => [key, toGeminiJsonSchema(nested)]),
   );
 }
 
@@ -79,13 +84,21 @@ async function loadImagePart(
   };
 }
 
+export async function loadGeminiImagePart(
+  fetcher: FetchLike,
+  url: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  return (await loadImagePart(fetcher, url, 0, signal)).part;
+}
+
 export async function dispatchGeminiAnalysis(
   fetcher: FetchLike,
   apiKey: string,
   request: GeminiAnalysisRequest,
   endpoint = GEMINI_GENERATE_CONTENT_ENDPOINT,
   signal?: AbortSignal,
-): Promise<Response> {
+): Promise<GeminiDispatchResult> {
   const parts: Array<Record<string, unknown>> = [{ text: request.prompt }];
   let totalImageBytes = 0;
 
@@ -95,7 +108,8 @@ export async function dispatchGeminiAnalysis(
     parts.push(loaded.part);
   }
 
-  return fetcher(endpoint, {
+  const startedAt = performance.now();
+  const response = await fetcher(endpoint, {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,
@@ -108,13 +122,14 @@ export async function dispatchGeminiAnalysis(
         responseFormat: {
           text: {
             mimeType: "application/json",
-            schema: providerJsonSchema(request.responseJsonSchema),
+            schema: toGeminiJsonSchema(request.responseJsonSchema),
           },
         },
       },
     }),
     signal,
   });
+  return { response, elapsedMs: Math.round(performance.now() - startedAt) };
 }
 
 export function extractGeminiStructuredText(value: unknown): { text: string | null; refused: boolean } {

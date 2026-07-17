@@ -6,6 +6,11 @@ import {
   dispatchGeminiAnalysis,
   extractGeminiStructuredText,
 } from "../../supabase/functions/_shared/gemini-provider";
+import {
+  mapGeminiHttpFailure,
+  readGeminiFailureDiagnostic,
+  sanitizeProviderMessage,
+} from "../../supabase/functions/_shared/gemini-diagnostics";
 
 const request = {
   systemInstruction: "Return observations only.",
@@ -98,5 +103,76 @@ describe("direct Gemini provider adapter", () => {
       "server-only-key",
       request,
     )).rejects.toMatchObject({ code: "PROVIDER_EVIDENCE_FETCH" });
+  });
+
+  it("maps every provider HTTP failure to a distinct safe internal code", () => {
+    expect([
+      [400, "PROVIDER_INVALID_REQUEST"],
+      [401, "PROVIDER_AUTH"],
+      [403, "PROVIDER_AUTH"],
+      [404, "PROVIDER_MODEL_NOT_FOUND"],
+      [429, "PROVIDER_RATE_LIMIT"],
+      [500, "PROVIDER_INTERNAL"],
+      [503, "PROVIDER_UNAVAILABLE"],
+      [504, "PROVIDER_TIMEOUT"],
+      [418, "PROVIDER_ERROR"],
+    ].map(([status, code]) => [status, mapGeminiHttpFailure(Number(status)), code])).toEqual([
+      [400, "PROVIDER_INVALID_REQUEST", "PROVIDER_INVALID_REQUEST"],
+      [401, "PROVIDER_AUTH", "PROVIDER_AUTH"],
+      [403, "PROVIDER_AUTH", "PROVIDER_AUTH"],
+      [404, "PROVIDER_MODEL_NOT_FOUND", "PROVIDER_MODEL_NOT_FOUND"],
+      [429, "PROVIDER_RATE_LIMIT", "PROVIDER_RATE_LIMIT"],
+      [500, "PROVIDER_INTERNAL", "PROVIDER_INTERNAL"],
+      [503, "PROVIDER_UNAVAILABLE", "PROVIDER_UNAVAILABLE"],
+      [504, "PROVIDER_TIMEOUT", "PROVIDER_TIMEOUT"],
+      [418, "PROVIDER_ERROR", "PROVIDER_ERROR"],
+    ]);
+  });
+
+  it("records only allowlisted diagnostics and redacts keys, tokens, images, and payloads", async () => {
+    const apiKey = "server-only-secret-key";
+    const leakedJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature";
+    const response = new Response(JSON.stringify({
+      error: {
+        status: "INVALID_ARGUMENT",
+        message: `Invalid request key=${apiKey} Authorization: Bearer sensitive ${leakedJwt} data:image/png;base64,${"A".repeat(200)} prompt={${"x".repeat(600)}}`,
+        details: [{ requestBody: "must never be retained" }],
+      },
+      request: { headers: { "x-goog-api-key": apiKey }, image: "B".repeat(500) },
+    }), {
+      status: 400,
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-request-id": "safe-request-123",
+        "x-ignored-secret-header": apiKey,
+      },
+    });
+
+    const diagnostic = await readGeminiFailureDiagnostic({ response, apiKey, elapsedMs: 27 });
+    const serialized = JSON.stringify(diagnostic);
+
+    expect(diagnostic).toMatchObject({
+      upstreamHttpStatus: 400,
+      googleErrorStatus: "INVALID_ARGUMENT",
+      requestIds: { "x-goog-request-id": "safe-request-123" },
+      model: "gemini-3.5-flash",
+      endpointVersion: "v1beta",
+      elapsedMs: 27,
+      internalCode: "PROVIDER_INVALID_REQUEST",
+    });
+    expect(diagnostic.sanitizedMessage.length).toBeLessThanOrEqual(500);
+    expect(serialized).not.toContain(apiKey);
+    expect(serialized).not.toContain("sensitive");
+    expect(serialized).not.toContain(leakedJwt);
+    expect(serialized).not.toContain("data:image");
+    expect(serialized).not.toContain("must never be retained");
+    expect(serialized).not.toContain("x-ignored-secret-header");
+  });
+
+  it("caps standalone safe messages without retaining raw objects", () => {
+    const safe = sanitizeProviderMessage(`Failure ${JSON.stringify({ prompt: "private", body: "Z".repeat(900) })}`);
+    expect(safe.length).toBeLessThanOrEqual(500);
+    expect(safe).not.toContain("private");
+    expect(safe).not.toContain("Z".repeat(80));
   });
 });

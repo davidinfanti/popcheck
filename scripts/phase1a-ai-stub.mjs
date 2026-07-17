@@ -111,8 +111,11 @@ const server = createServer(async (request, response) => {
     return;
   }
   if (evidenceMarker.includes("stub-provider-error")) {
-    response.writeHead(503, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ error: { code: 503, message: "Synthetic provider failure" } }));
+    response.writeHead(503, {
+      "Content-Type": "application/json",
+      "x-goog-request-id": "synthetic-request-id",
+    });
+    response.end(JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "Synthetic provider failure" } }));
     return;
   }
   response.writeHead(200, { "Content-Type": "application/json" });
