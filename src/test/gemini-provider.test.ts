@@ -10,6 +10,7 @@ import {
   mapGeminiHttpFailure,
   readGeminiFailureDiagnostic,
   runGeminiIsolationProbes,
+  runGeminiSchemaIsolationProbes,
   sanitizeProviderMessage,
 } from "../../supabase/functions/_shared/gemini-diagnostics";
 
@@ -235,5 +236,37 @@ describe("direct Gemini provider adapter", () => {
     expect(serialized).not.toContain("private full system instruction");
     expect(serialized).not.toContain("must not be returned");
     expect(serialized).not.toContain("AAAA");
+  });
+
+  it("can rerun schema isolation without replaying capability probes", async () => {
+    let calls = 0;
+    const fetcher = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({
+          error: { status: "INVALID_ARGUMENT", message: "Request contains an invalid argument." },
+        }), { status: 400 });
+      }
+      return new Response(JSON.stringify({
+        candidates: [{ finishReason: "STOP", content: { parts: [{ text: '{"value":"ready"}' }] } }],
+      }), { status: 200 });
+    });
+
+    const results = await runGeminiSchemaIsolationProbes({
+      fetcher,
+      apiKey: "server-only-key",
+      fullSchema: {
+        type: "object",
+        properties: { value: { type: "string", description: "A diagnostic value." } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+    });
+
+    expect(calls).toBe(2);
+    expect(results.map(({ variant, result }) => [variant, result])).toEqual([
+      ["exact_schema_minimal_prompt", "FAIL"],
+      ["schema_without_descriptions", "PASS"],
+    ]);
   });
 });

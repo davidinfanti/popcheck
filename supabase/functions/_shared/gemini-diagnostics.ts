@@ -369,7 +369,7 @@ async function schemaIsolationProbe(input: {
   };
 }
 
-async function isolateFullSchemaFailure(input: {
+export async function runGeminiSchemaIsolationProbes(input: {
   fetcher: FetchLike;
   apiKey: string;
   fullSchema: Record<string, unknown>;
@@ -522,7 +522,7 @@ export async function runGeminiIsolationProbes(input: {
   if (fullTextResult.result === "FAIL" &&
     fullTextResult.upstreamHttpStatus === 400 &&
     fullTextResult.googleErrorStatus === "INVALID_ARGUMENT") {
-    fullTextResult.schemaIsolation = await isolateFullSchemaFailure({
+    fullTextResult.schemaIsolation = await runGeminiSchemaIsolationProbes({
       fetcher: input.fetcher,
       apiKey: input.apiKey,
       fullSchema: input.fullSchema,

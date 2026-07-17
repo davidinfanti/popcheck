@@ -9,6 +9,7 @@ import {
 import {
   readGeminiFailureDiagnostic,
   runGeminiIsolationProbes,
+  runGeminiSchemaIsolationProbes,
   timeoutDiagnostic,
 } from "../_shared/gemini-diagnostics.ts";
 import {
@@ -195,6 +196,16 @@ Deno.serve(async (req) => {
         });
       } catch {
         return jsonResponse({ error: "Invalid synthetic diagnostic evidence" }, 400);
+      }
+      if (requestBody?.schemaIsolationOnly === true) {
+        const schemaIsolation = await runGeminiSchemaIsolationProbes({
+          fetcher: fetch,
+          apiKey,
+          fullSchema: observationTool.function.parameters,
+        });
+        const firstFailure = schemaIsolation.find((probe) => probe.result === "FAIL");
+        if (firstFailure) console.error("Gemini schema-isolation failure:", JSON.stringify(firstFailure));
+        return jsonResponse({ success: !firstFailure, schemaIsolation });
       }
       const probes = await runGeminiIsolationProbes({
         fetcher: fetch,
