@@ -1,5 +1,8 @@
 begin;
 
+set local role postgres;
+set local search_path = extensions, public, auth, pg_catalog;
+
 select plan(16);
 
 insert into auth.users (
@@ -140,7 +143,7 @@ select throws_ok(
   'authenticated user cannot update details'
 );
 
-reset role;
+set local role postgres;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"22222222-2222-4222-8222-222222222222","role":"authenticated"}';
 
@@ -150,7 +153,7 @@ select results_eq(
   'non-owner cannot read another user submission'
 );
 
-reset role;
+set local role postgres;
 set local role service_role;
 set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000000","role":"service_role"}';
 
@@ -159,7 +162,7 @@ select lives_ok(
   'service role can write a completed backend result'
 );
 
-reset role;
+set local role postgres;
 set local role anon;
 set local request.jwt.claims = '{"role":"anon"}';
 
@@ -169,7 +172,7 @@ select results_eq(
   'shared-token RPC returns the matching submission to anon'
 );
 
-reset role;
+set local role postgres;
 
 select * from finish();
 rollback;

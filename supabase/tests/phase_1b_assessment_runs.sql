@@ -1,5 +1,8 @@
 begin;
 
+set local role postgres;
+set local search_path = extensions, public, auth, pg_catalog;
+
 select plan(22);
 
 insert into auth.users (
@@ -73,7 +76,7 @@ select lives_ok(
   'service role can insert the first assessment run'
 );
 
-reset role;
+set local role postgres;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}';
 
@@ -96,7 +99,7 @@ select throws_ok(
   'owner cannot forge an assessment run'
 );
 
-reset role;
+set local role postgres;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"44444444-4444-4444-8444-444444444444","role":"authenticated"}';
 
@@ -106,7 +109,7 @@ select results_eq(
   'non-owner cannot read another submission run'
 );
 
-reset role;
+set local role postgres;
 set local role anon;
 set local request.jwt.claims = '{"role":"anon"}';
 
@@ -116,7 +119,7 @@ select results_eq(
   'shared-token RPC returns assessment history to anon'
 );
 
-reset role;
+set local role postgres;
 set local role service_role;
 set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000000","role":"service_role"}';
 
@@ -143,7 +146,7 @@ select results_eq(
 
 -- Exercise the trigger itself under a transaction-local privilege elevation.
 -- Production intentionally withholds these privileges from service_role.
-reset role;
+set local role postgres;
 grant update, delete on public.assessment_runs to service_role;
 set local role service_role;
 
@@ -159,7 +162,7 @@ select throws_ok(
   'even the service role cannot delete a prior run'
 );
 
-reset role;
+set local role postgres;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"33333333-3333-4333-8333-333333333333","role":"authenticated"}';
 

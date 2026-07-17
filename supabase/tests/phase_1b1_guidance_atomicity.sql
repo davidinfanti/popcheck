@@ -1,5 +1,8 @@
 begin;
 
+set local role postgres;
+set local search_path = extensions, public, auth, pg_catalog;
+
 select plan(38);
 
 insert into auth.users (
@@ -111,7 +114,7 @@ select throws_ok(
   'non-admin cannot create structured guidance'
 );
 
-reset role;
+set local role postgres;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"55555555-5555-4555-8555-555555555555","role":"authenticated"}';
 
@@ -174,7 +177,7 @@ select results_eq(
   'rejected guidance creates no partial version'
 );
 
-reset role;
+set local role postgres;
 grant update on public.structured_guidance_versions to service_role;
 set local role service_role;
 set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000000","role":"service_role"}';
@@ -185,7 +188,7 @@ select throws_ok(
   'structured guidance history cannot be rewritten'
 );
 
-reset role;
+set local role postgres;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"66666666-6666-4666-8666-666666666666","role":"authenticated"}';
 
@@ -200,7 +203,7 @@ select throws_ok(
   'authenticated callers cannot invoke atomic completion'
 );
 
-reset role;
+set local role postgres;
 set local role service_role;
 set local request.jwt.claims = '{"sub":"00000000-0000-0000-0000-000000000000","role":"service_role"}';
 
@@ -317,7 +320,7 @@ select results_eq(
   'stale completion creates no duplicate run'
 );
 
-reset role;
+set local role postgres;
 create or replace function pg_temp.reject_phase_1b1_snapshot()
 returns trigger
 language plpgsql
@@ -361,7 +364,7 @@ select results_eq(
   'snapshot failure leaves the source row unchanged'
 );
 
-reset role;
+set local role postgres;
 
 select results_eq(
   $$select public.backfill_legacy_assessment_runs()$$,
