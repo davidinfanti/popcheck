@@ -31,8 +31,10 @@ export default function Auth() {
         await signIn(email, password);
         toast.success("Welcome back!");
       } else {
-        await signUp(email, password, displayName);
-        toast.success("Account created! Check your email to verify.");
+        const signupSession = await signUp(email, password, displayName);
+        toast.success(signupSession
+          ? "Account created. You are signed in."
+          : "Account created! Check your email to verify.");
       }
       navigate("/");
     } catch (err: any) {
