@@ -269,4 +269,52 @@ describe("direct Gemini provider adapter", () => {
       ["schema_without_descriptions", "PASS"],
     ]);
   });
+
+  it("isolates observations array-bound complexity without changing the supplied schema", async () => {
+    let calls = 0;
+    const fetcher = vi.fn(async () => {
+      calls += 1;
+      if (calls <= 3) {
+        return new Response(JSON.stringify({
+          error: { status: "INVALID_ARGUMENT", message: "Request contains an invalid argument." },
+        }), { status: 400 });
+      }
+      return new Response(JSON.stringify({
+        candidates: [{ finishReason: "STOP", content: { parts: [{ text: '{"observations":[]}' }] } }],
+      }), { status: 200 });
+    });
+    const fullSchema = {
+      type: "object",
+      properties: {
+        observations: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: "object",
+            properties: { code: { type: "string", enum: ["A", "B"] } },
+            required: ["code"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["observations"],
+      additionalProperties: false,
+    };
+
+    const results = await runGeminiSchemaIsolationProbes({
+      fetcher,
+      apiKey: "server-only-key",
+      fullSchema,
+    });
+
+    expect(fullSchema.properties.observations.maxItems).toBe(100);
+    expect(results.map(({ variant, result }) => [variant, result])).toEqual([
+      ["exact_schema_minimal_prompt", "FAIL"],
+      ["schema_without_descriptions", "FAIL"],
+      ["top_level_observations", "FAIL"],
+      ["observations_without_max_items", "PASS"],
+      ["observations_max_items_30", "PASS"],
+    ]);
+  });
 });

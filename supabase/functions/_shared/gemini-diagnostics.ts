@@ -337,6 +337,19 @@ function schemaByteLength(schema: Record<string, unknown>): number {
   return new TextEncoder().encode(JSON.stringify(toGeminiJsonSchema(schema))).byteLength;
 }
 
+function observationArrayVariant(
+  fullSchema: Record<string, unknown>,
+  transform: (observations: Record<string, unknown>) => void,
+): Record<string, unknown> | null {
+  const schema = schemaForTopLevelProperties(fullSchema, ["observations"]);
+  if (!schema) return null;
+  const cloned = structuredClone(schema);
+  const properties = cloned.properties;
+  if (!isRecord(properties) || !isRecord(properties.observations)) return null;
+  transform(properties.observations);
+  return cloned;
+}
+
 async function schemaIsolationProbe(input: {
   variant: string;
   fetcher: FetchLike;
@@ -399,6 +412,33 @@ export async function runGeminiSchemaIsolationProbes(input: {
     if (!schema) continue;
     const result = await run(`top_level_${name}`, schema);
     if (result.result === "PASS") individuallyPassing.push(name);
+    if (name === "observations" && result.result === "FAIL" && result.upstreamHttpStatus === 400) {
+      const withoutMaximum = observationArrayVariant(input.fullSchema, (observations) => {
+        delete observations.maxItems;
+      });
+      if (!withoutMaximum) return results;
+      const noMaximumResult = await run("observations_without_max_items", withoutMaximum);
+      if (noMaximumResult.result === "PASS") {
+        for (const maximum of [30, 10, 1]) {
+          const bounded = observationArrayVariant(input.fullSchema, (observations) => {
+            observations.maxItems = maximum;
+          });
+          if (!bounded) return results;
+          const boundedResult = await run(`observations_max_items_${maximum}`, bounded);
+          if (boundedResult.result === "PASS") break;
+        }
+        return results;
+      }
+
+      const withoutEnums = observationArrayVariant(input.fullSchema, (observations) => {
+        if (!isRecord(observations.items) || !isRecord(observations.items.properties)) return;
+        for (const property of Object.values(observations.items.properties)) {
+          if (isRecord(property)) delete property.enum;
+        }
+      });
+      if (withoutEnums) await run("observations_without_enums", withoutEnums);
+      return results;
+    }
   }
 
   // If every branch is accepted separately, find the first aggregate combination the provider rejects.
