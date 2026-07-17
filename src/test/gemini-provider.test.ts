@@ -317,4 +317,29 @@ describe("direct Gemini provider adapter", () => {
       ["observations_max_items_30", "PASS"],
     ]);
   });
+
+  it("stops schema isolation immediately when the provider rate-limits the probe", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      error: { status: "RESOURCE_EXHAUSTED", message: "Quota temporarily exhausted." },
+    }), { status: 429 }));
+
+    const results = await runGeminiSchemaIsolationProbes({
+      fetcher,
+      apiKey: "server-only-key",
+      fullSchema: {
+        type: "object",
+        properties: { value: { type: "string" } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(results).toMatchObject([{
+      variant: "exact_schema_minimal_prompt",
+      upstreamHttpStatus: 429,
+      googleErrorStatus: "RESOURCE_EXHAUSTED",
+      internalCode: "PROVIDER_RATE_LIMIT",
+    }]);
+  });
 });

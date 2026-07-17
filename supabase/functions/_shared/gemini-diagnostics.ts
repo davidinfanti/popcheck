@@ -75,6 +75,13 @@ export function mapGeminiHttpFailure(status: number): ProviderFailureCode {
   return "PROVIDER_ERROR";
 }
 
+function isTransientFailure(result: { internalCode: ProviderFailureCode | null }): boolean {
+  return result.internalCode === "PROVIDER_RATE_LIMIT" ||
+    result.internalCode === "PROVIDER_INTERNAL" ||
+    result.internalCode === "PROVIDER_UNAVAILABLE" ||
+    result.internalCode === "PROVIDER_TIMEOUT";
+}
+
 export function sanitizeProviderMessage(message: unknown, secrets: string[] = []): string {
   let safe = typeof message === "string" && message.trim()
     ? message
@@ -396,11 +403,13 @@ export async function runGeminiSchemaIsolationProbes(input: {
 
   // First remove prompt size/content as a confound while preserving the exact schema.
   const exactSchema = await run("exact_schema_minimal_prompt", input.fullSchema);
+  if (isTransientFailure(exactSchema)) return results;
   if (exactSchema.result === "PASS") return results;
 
   // Descriptions are supported, but can push an otherwise valid schema over provider complexity limits.
   const compactSchema = stripSchemaDescriptions(input.fullSchema) as Record<string, unknown>;
   const compact = await run("schema_without_descriptions", compactSchema);
+  if (isTransientFailure(compact)) return results;
   if (compact.result === "PASS") return results;
 
   const properties = input.fullSchema.properties;
@@ -411,6 +420,7 @@ export async function runGeminiSchemaIsolationProbes(input: {
     const schema = schemaForTopLevelProperties(input.fullSchema, [name]);
     if (!schema) continue;
     const result = await run(`top_level_${name}`, schema);
+    if (isTransientFailure(result)) return results;
     if (result.result === "PASS") individuallyPassing.push(name);
     if (name === "observations" && result.result === "FAIL" && result.upstreamHttpStatus === 400) {
       const withoutMaximum = observationArrayVariant(input.fullSchema, (observations) => {
@@ -418,6 +428,7 @@ export async function runGeminiSchemaIsolationProbes(input: {
       });
       if (!withoutMaximum) return results;
       const noMaximumResult = await run("observations_without_max_items", withoutMaximum);
+      if (isTransientFailure(noMaximumResult)) return results;
       if (noMaximumResult.result === "PASS") {
         for (const maximum of [30, 10, 1]) {
           const bounded = observationArrayVariant(input.fullSchema, (observations) => {
@@ -425,6 +436,7 @@ export async function runGeminiSchemaIsolationProbes(input: {
           });
           if (!bounded) return results;
           const boundedResult = await run(`observations_max_items_${maximum}`, bounded);
+          if (isTransientFailure(boundedResult)) return results;
           if (boundedResult.result === "PASS") break;
         }
         return results;
@@ -450,6 +462,7 @@ export async function runGeminiSchemaIsolationProbes(input: {
       const schema = schemaForTopLevelProperties(input.fullSchema, progressive);
       if (!schema) continue;
       const result = await run(`progressive_${progressive.join("+")}`, schema);
+      if (isTransientFailure(result)) return results;
       if (result.result === "FAIL") break;
     }
   }
