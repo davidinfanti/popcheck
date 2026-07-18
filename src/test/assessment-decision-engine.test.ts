@@ -6,6 +6,10 @@ import {
   type StructuredObservation,
 } from "@/lib/assessment/contract";
 import { decideAssessment } from "@/lib/assessment/decisionEngine";
+import {
+  saulGoodman163CounterfeitFalseNegativeV1,
+  saulGoodman163CounterfeitRegressionMetadataV1,
+} from "./fixtures/saul-goodman-163-counterfeit-false-negative-v1";
 
 function observation(overrides: Partial<StructuredObservation> = {}): StructuredObservation {
   return {
@@ -48,7 +52,7 @@ function output(overrides: Partial<ObservationOutput> = {}): ObservationOutput {
   };
 }
 
-describe("popcheck-decision-v1", () => {
+describe("popcheck-decision-v2", () => {
   it("emits unable_to_assess when evidence is insufficient", () => {
     const result = decideAssessment(output({ observations: [observation()] }));
     expect(result.decision.verdictClass).toBe("unable_to_assess");
@@ -121,14 +125,37 @@ describe("popcheck-decision-v1", () => {
     expect(result.decision.verdictClass).toBe("consistent_with_verified_references");
   });
 
-  it("emits no_material_anomaly_detected without claiming authenticity", () => {
+  it("defaults to inconclusive when sufficient evidence has no usable reference", () => {
     const result = decideAssessment(output());
+    expect(result.dimensions.referenceCoverage).toBe("none");
+    expect(result.decision.verdictClass).toBe("inconclusive");
+    expect(result.decision.verdictClass).not.toBe("no_material_anomaly_detected");
+    expect(result.decision.verdictClass).not.toBe("consistent_with_verified_references");
+  });
+
+  it("never treats an absence of observed risk as authenticity", () => {
+    const result = decideAssessment(output({ observations: [
+      observation({
+        code: "REFERENCE_COMPARISON",
+        category: "reference",
+        findingType: "limitation",
+        finding: "A verified comparison exists but does not cover every physical feature.",
+        referenceUsed: "verified-ref-1",
+        referenceReliability: "verified",
+      }),
+      observation({
+        code: "IMAGE_QUALITY",
+        category: "evidence_quality",
+        findingType: "limitation",
+        finding: "The submitted image quality is sufficient for only the visible areas.",
+      }),
+    ] }));
+
     expect(result.decision.verdictClass).toBe("no_material_anomaly_detected");
-    expect(result.decision.explanation).toContain("does not mean zero anomalies");
     expect(result.decision.explanation).toContain("does not establish or certify authenticity");
   });
 
-  it("keeps low-severity risk observations visible without changing the verdict rule", () => {
+  it("keeps low-severity risk observations visible without treating no-reference evidence as authentic", () => {
     const result = decideAssessment(output({ observations: [
       observation(),
       observation({
@@ -140,9 +167,9 @@ describe("popcheck-decision-v1", () => {
       }),
     ] }));
 
-    expect(result.decision.verdictClass).toBe("no_material_anomaly_detected");
+    expect(result.decision.verdictClass).toBe("inconclusive");
     expect(result.decision.riskObservations).toEqual(["MINOR_PRINT_VARIATION"]);
-    expect(result.decision.explanation).toContain("Minor or low-severity observations may still be present");
+    expect(result.decision.explanation).toContain("no substantive conclusion is supported");
   });
 
   it("never allows legacy-unverified references to produce the verified-reference verdict or high reliability", () => {
@@ -158,6 +185,30 @@ describe("popcheck-decision-v1", () => {
     expect(result.dimensions.referenceCoverage).toBe("legacy_unverified");
     expect(result.dimensions.assessmentReliability).not.toBe("high");
     expect(result.decision.verdictClass).toBe("no_material_anomaly_detected");
+  });
+
+  it("regresses the known counterfeit Saul Goodman #163 false negative to inconclusive", () => {
+    const result = decideAssessment(saulGoodman163CounterfeitFalseNegativeV1);
+
+    expect(saulGoodman163CounterfeitRegressionMetadataV1.knownGroundTruth).toBe("counterfeit");
+    expect(result.dimensions.referenceCoverage).toBe("none");
+    expect(result.dimensions.counterfeitIndicatorStrength).toBe("none_observed");
+    expect(result.decision.verdictClass).toBe("inconclusive");
+    expect(result.decision.verdictClass).not.toBe("no_material_anomaly_detected");
+    expect(result.decision.verdictClass).not.toBe("consistent_with_verified_references");
+  });
+
+  it("treats identity text, barcode, and unverified third-party stickers as non-positive comparison evidence", () => {
+    const result = decideAssessment(output({ observations: [
+      observation({ code: "IDENTITY_TEXT", category: "identity" }),
+      observation({ code: "BARCODE", category: "code" }),
+      observation({ code: "STICKER_DETAIL", category: "sticker", finding: "A third-party certification label is visible." }),
+    ] }));
+
+    expect(result.dimensions.identityStatus).toBe("identified");
+    expect(result.dimensions.codeConsistency).toBe("not_assessable");
+    expect(result.dimensions.visualConsistency).toBe("not_assessable");
+    expect(result.decision.verdictClass).toBe("inconclusive");
   });
 
   it("treats not_visible as unavailable evidence, never false or counterfeit", () => {

@@ -1,6 +1,9 @@
 export const OBSERVATION_SCHEMA_VERSION = "popcheck-observation-schema-v1";
 export const PROMPT_VERSION = "popcheck-observation-v1";
-export const DECISION_ENGINE_VERSION = "popcheck-decision-v1";
+// Versioned so append-only historical runs retain the exact engine that created
+// them. v2 adds a conservative reference-coverage gate after a closed-beta
+// false negative that had no usable comparison reference.
+export const DECISION_ENGINE_VERSION = "popcheck-decision-v2";
 
 export const OBSERVATION_STATUSES = [
   "observed",

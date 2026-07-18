@@ -432,7 +432,7 @@ describe("direct Gemini provider adapter", () => {
       normalizeGeminiTransportOutput(transportFixture(), FALLBACK_ANALYSIS_MODEL),
     );
     expect(fallbackOutput.observations.every((item) => item.modelVersion === FALLBACK_ANALYSIS_MODEL)).toBe(true);
-    expect(decideAssessment(fallbackOutput).decision.verdictClass).toBe("no_material_anomaly_detected");
+    expect(decideAssessment(fallbackOutput).decision.verdictClass).toBe("inconclusive");
   });
 
   it("keeps attempt metadata free of keys, prompts, and image payloads", async () => {

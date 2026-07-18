@@ -50,10 +50,30 @@ export interface AssessmentResult {
 
 const severityRank = { informational: 0, low: 1, medium: 2, high: 3, critical: 4 } as const;
 
+// These fields can establish what item is being discussed, but cannot establish
+// that the submitted physical item is genuine. Third-party labels, grading
+// labels, protectors, and certificates are represented by STICKER_DETAIL in the
+// current contract; until their relationship to the exact item is modelled and
+// independently verified, no sticker detail is positive comparison evidence.
+const IDENTITY_ONLY_SUPPORT_CODES = new Set([
+  "IDENTITY_TEXT",
+  "BARCODE",
+  "PRODUCTION_CODE",
+  "FACTORY_CODE",
+]);
+const INFORMATIONAL_ONLY_SUPPORT_CODES = new Set(["STICKER_DETAIL"]);
+
 function observedMaterialRisks(observations: StructuredObservation[]): StructuredObservation[] {
   return observations.filter((observation) =>
     observation.findingType === "risk_indicator" && observation.observationStatus === "observed"
   );
+}
+
+function supportsAuthenticityComparison(observation: StructuredObservation): boolean {
+  return observation.findingType === "supporting_consistency" &&
+    observation.observationStatus === "observed" &&
+    !IDENTITY_ONLY_SUPPORT_CODES.has(observation.code) &&
+    !INFORMATIONAL_ONLY_SUPPORT_CODES.has(observation.code);
 }
 
 function deriveEvidenceQuality(output: ObservationOutput): EvidenceQuality {
@@ -96,7 +116,7 @@ function deriveConsistency(observations: StructuredObservation[], categories: st
   if (maxRisk >= severityRank.high) return "inconsistent";
   if (maxRisk >= severityRank.medium) return "mixed";
   if (maxRisk >= severityRank.low) return "mostly_consistent";
-  if (relevant.some((item) => item.findingType === "supporting_consistency" && item.observationStatus === "observed")) {
+  if (relevant.some(supportsAuthenticityComparison)) {
     return "consistent";
   }
   return "not_assessable";
@@ -183,6 +203,10 @@ function selectVerdict(dimensions: AssessmentDimensions): VerdictClass {
     ["consistent", "mostly_consistent"].includes(dimensions.visualConsistency) &&
     ["consistent", "mostly_consistent", "not_assessable"].includes(dimensions.codeConsistency)
   ) return "consistent_with_verified_references";
+  // A lack of observed risk in an item with no comparison reference is not
+  // evidence of authenticity. Preserve visible observations and identity, but
+  // default the final assessment to uncertainty.
+  if (dimensions.referenceCoverage === "none") return "inconclusive";
   if (["none_observed", "weak"].includes(dimensions.counterfeitIndicatorStrength)) {
     return "no_material_anomaly_detected";
   }

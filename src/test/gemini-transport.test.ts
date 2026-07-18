@@ -147,7 +147,7 @@ describe("Gemini observation transport", () => {
   it("leaves the final verdict exclusively to the deterministic engine", () => {
     const output = parseObservationOutput(normalizeGeminiTransportOutput(transportFixture()));
     const assessment = decideAssessment(output);
-    expect(assessment.decision.verdictClass).toBe("no_material_anomaly_detected");
+    expect(assessment.decision.verdictClass).toBe("inconclusive");
     expect(JSON.stringify(assessment.decision)).not.toContain("provider");
   });
 });
