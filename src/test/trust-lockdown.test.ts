@@ -69,7 +69,8 @@ describe("Edge Function trust boundaries", () => {
     const source = projectFile("supabase/functions/analyze-funko/index.ts");
 
     expect(source).toContain('status: "evidence_required"');
-    expect(source).toContain("details: { failure }");
+    expect(source).toContain("details: {");
+    expect(source).toContain("failure: {");
     expect(source).toContain("toSafeEvidenceFailure");
   });
 

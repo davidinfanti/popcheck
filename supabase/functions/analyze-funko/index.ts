@@ -2,12 +2,16 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { EvidenceValidationError, resolveCanonicalEvidence, toSafeEvidenceFailure } from "../_shared/evidence-source.ts";
 import {
   ANALYSIS_MODEL,
+  EVIDENCE_PREPARATION_TIMEOUT_MS,
   GEMINI_TOTAL_TIMEOUT_MS,
+  OVERALL_ANALYSIS_TIMEOUT_MS,
   GeminiEvidenceFetchError,
+  GeminiEvidenceTimeoutError,
   type GeminiProviderMode,
   type GeminiResilientDispatchResult,
   dispatchGeminiAnalysisWithResilience,
   extractGeminiStructuredText,
+  prepareGeminiEvidence,
 } from "../_shared/gemini-provider.ts";
 import {
   GEMINI_OBSERVATION_TRANSPORT_SCHEMA,
@@ -46,8 +50,8 @@ type ServiceClient = ReturnType<typeof createClient>;
 type SafeProviderAttempt = {
   model: string;
   providerMode: GeminiProviderMode;
-  upstreamHttpStatus: number;
-  elapsedMs: number;
+  upstreamHttpStatus: number | null;
+  elapsedMs: number | null;
 };
 
 type SafeProviderAudit = {
@@ -59,6 +63,19 @@ type SafeProviderAudit = {
   providerSchemaVersion: string;
   totalProviderLatencyMs: number;
   attempts: SafeProviderAttempt[];
+};
+
+type SafeAnalysisTiming = {
+  evidenceFetchMs: number | null;
+  evidencePreparationMs: number | null;
+  providerMs: number | null;
+  totalMs: number;
+  phaseOnFailure: string | null;
+};
+
+type Deadline = {
+  signal: AbortSignal;
+  dispose: () => void;
 };
 
 function safeProviderAudit(dispatched: GeminiResilientDispatchResult, successful: boolean): SafeProviderAudit {
@@ -79,6 +96,46 @@ function safeProviderAudit(dispatched: GeminiResilientDispatchResult, successful
   };
 }
 
+function pendingProviderAudit(
+  attempts: Array<Pick<SafeProviderAttempt, "model" | "providerMode">>,
+  providerMs: number,
+): SafeProviderAudit {
+  return {
+    requestedPrimaryModel: ANALYSIS_MODEL,
+    successfulModel: null,
+    attemptCount: attempts.length,
+    fallbackUsed: attempts.some((attempt) => attempt.model !== ANALYSIS_MODEL),
+    providerMode: attempts.at(-1)?.providerMode || null,
+    providerSchemaVersion: GEMINI_TRANSPORT_SCHEMA_VERSION,
+    totalProviderLatencyMs: providerMs,
+    attempts: attempts.map((attempt) => ({ ...attempt, upstreamHttpStatus: null, elapsedMs: null })),
+  };
+}
+
+function timing(
+  startedAt: number,
+  input: Omit<SafeAnalysisTiming, "totalMs">,
+): SafeAnalysisTiming {
+  return { ...input, totalMs: Math.round(performance.now() - startedAt) };
+}
+
+function createDeadline(overallSignal: AbortSignal, timeoutMs: number): Deadline {
+  const controller = new AbortController();
+  const abortForOverall = () => controller.abort();
+  if (overallSignal.aborted) abortForOverall();
+  else overallSignal.addEventListener("abort", abortForOverall, { once: true });
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer);
+      overallSignal.removeEventListener("abort", abortForOverall);
+    },
+  };
+}
+
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -93,6 +150,7 @@ async function persistControlledFailure(
   code: string,
   message: string,
   providerAudit?: SafeProviderAudit,
+  failureTiming?: SafeAnalysisTiming,
 ): Promise<void> {
   const { error } = await client
     .from("authentications")
@@ -106,6 +164,7 @@ async function persistControlledFailure(
           occurredAt: new Date().toISOString(),
           promptVersion: PROMPT_VERSION,
           ...(providerAudit ? { providerAudit } : {}),
+          ...(failureTiming ? { timing: failureTiming } : {}),
         },
       },
     })
@@ -216,6 +275,22 @@ Deno.serve(async (req) => {
     const serviceClient = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const apiKey = Deno.env.get("GEMINI_API_KEY");
     const completionToken = crypto.randomUUID();
+    const analysisStartedAt = performance.now();
+    const overallController = new AbortController();
+    let overallDeadlineExpired = false;
+    const overallTimer = setTimeout(() => {
+      overallDeadlineExpired = true;
+      overallController.abort();
+    }, OVERALL_ANALYSIS_TIMEOUT_MS);
+    let evidenceFetchMs: number | null = null;
+    let evidencePreparationMs: number | null = null;
+    let providerMs: number | null = null;
+    const failureTiming = (phaseOnFailure: string): SafeAnalysisTiming => timing(analysisStartedAt, {
+      evidenceFetchMs,
+      evidencePreparationMs,
+      providerMs,
+      phaseOnFailure,
+    });
 
     let canonicalEvidence: ReturnType<typeof resolveCanonicalEvidence>;
     try {
@@ -230,10 +305,19 @@ Deno.serve(async (req) => {
       const failure = toSafeEvidenceFailure(error, new Date().toISOString());
       const { error: updateError } = await serviceClient
         .from("authentications")
-        .update({ status: "evidence_required", details: { failure } })
+        .update({
+          status: "evidence_required",
+          details: {
+            failure: {
+              ...failure,
+              timing: failureTiming("evidence_validation"),
+            },
+          },
+        })
         .eq("id", authenticationId)
         .eq("user_id", callerUserId);
       if (updateError) console.error("Failed to persist evidence validation state:", updateError.message);
+      clearTimeout(overallTimer);
       return jsonResponse({ error: error.code, message: error.message }, 422);
     }
 
@@ -296,27 +380,95 @@ Deno.serve(async (req) => {
     const userPrompt = `Inspect ${canonicalEvidence.imageUrls.length} submitted image(s). Submitted images are indices 0-${canonicalEvidence.imageUrls.length - 1}. Any appended reference images are context only and are legacy_unverified. Use ${GEMINI_TRANSPORT_NULL} for every unavailable string field and ${GEMINI_TRANSPORT_NULL_IMAGE_INDEX} when no submitted image index applies.`;
 
     if (!apiKey) {
-      await persistControlledFailure(serviceClient, authenticationId, callerUserId, "PROVIDER_CONFIGURATION", "The observation provider is not configured.");
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        "PROVIDER_CONFIGURATION",
+        "The observation provider is not configured.",
+        undefined,
+        failureTiming("provider_configuration"),
+      );
+      clearTimeout(overallTimer);
       return jsonResponse({ error: "PROVIDER_CONFIGURATION", message: "Analysis provider unavailable." }, 503);
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), GEMINI_TOTAL_TIMEOUT_MS);
+    let preparedEvidence: Awaited<ReturnType<typeof prepareGeminiEvidence>>;
+    const evidenceDeadline = createDeadline(overallController.signal, EVIDENCE_PREPARATION_TIMEOUT_MS);
+    try {
+      preparedEvidence = await prepareGeminiEvidence(fetch, providerImageUrls, evidenceDeadline.signal);
+      evidenceFetchMs = preparedEvidence.evidenceFetchMs;
+      evidencePreparationMs = preparedEvidence.evidencePreparationMs;
+    } catch (error) {
+      evidenceDeadline.dispose();
+      if (error instanceof GeminiEvidenceTimeoutError) {
+        evidenceFetchMs = error.evidenceFetchMs;
+        evidencePreparationMs = error.evidencePreparationMs;
+      }
+      const code = overallDeadlineExpired
+        ? "OVERALL_ANALYSIS_TIMEOUT"
+        : error instanceof GeminiEvidenceTimeoutError
+        ? error.code
+        : error instanceof GeminiEvidenceFetchError
+        ? error.code
+        : "PROVIDER_EVIDENCE_FETCH";
+      const message = code === "EVIDENCE_FETCH_TIMEOUT"
+        ? "A canonical image could not be retrieved before the evidence deadline."
+        : code === "EVIDENCE_PREPARATION_TIMEOUT"
+        ? "Canonical images could not be prepared before the evidence deadline."
+        : code === "OVERALL_ANALYSIS_TIMEOUT"
+        ? "The assessment exceeded its controlled application deadline."
+        : "One or more evidence images could not be prepared for analysis.";
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        code,
+        message,
+        undefined,
+        failureTiming(code === "EVIDENCE_FETCH_TIMEOUT" ? "evidence_fetch" : "evidence_preparation"),
+      );
+      clearTimeout(overallTimer);
+      return jsonResponse({ error: code, message: "Evidence could not be prepared for analysis." }, code.includes("TIMEOUT") ? 504 : 422);
+    }
+    evidenceDeadline.dispose();
+
     let response: Response;
     let providerElapsedMs = 0;
     let providerMode: GeminiProviderMode = "structured_schema";
     let providerModel = ANALYSIS_MODEL;
     let providerAudit: SafeProviderAudit | null = null;
+    const providerAttempts: Array<Pick<SafeProviderAttempt, "model" | "providerMode">> = [];
     const providerPipelineStartedAt = performance.now();
+    const remainingOverallMs = OVERALL_ANALYSIS_TIMEOUT_MS - Math.round(providerPipelineStartedAt - analysisStartedAt);
+    if (remainingOverallMs <= 0 || overallDeadlineExpired) {
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        "OVERALL_ANALYSIS_TIMEOUT",
+        "The assessment exceeded its controlled application deadline.",
+        undefined,
+        failureTiming("provider_execution"),
+      );
+      clearTimeout(overallTimer);
+      return jsonResponse({ error: "OVERALL_ANALYSIS_TIMEOUT", message: "Analysis timed out." }, 504);
+    }
+    const providerDeadline = createDeadline(overallController.signal, Math.min(GEMINI_TOTAL_TIMEOUT_MS, remainingOverallMs));
     try {
       const dispatched = await dispatchGeminiAnalysisWithResilience(fetch, apiKey, {
         systemInstruction: systemPrompt,
         prompt: userPrompt,
-        imageUrls: providerImageUrls,
+        imageUrls: [],
+        preparedEvidence,
         responseJsonSchema: GEMINI_OBSERVATION_TRANSPORT_SCHEMA,
-      }, Deno.env.get("GEMINI_API_ENDPOINT") || undefined, controller.signal);
+      }, Deno.env.get("GEMINI_API_ENDPOINT") || undefined, providerDeadline.signal, {
+        totalTimeoutMs: Math.min(GEMINI_TOTAL_TIMEOUT_MS, remainingOverallMs),
+        onAttemptStart: (attempt) => providerAttempts.push(attempt),
+      });
       response = dispatched.response;
       providerElapsedMs = dispatched.totalElapsedMs;
+      providerMs = providerElapsedMs;
       providerMode = dispatched.providerMode;
       providerModel = dispatched.model;
       providerAudit = safeProviderAudit(dispatched, response.ok);
@@ -330,21 +482,40 @@ Deno.serve(async (req) => {
         console.error("Gemini transport schema rejected; JSON fallback enabled:", JSON.stringify(diagnostic));
       }
     } catch (error) {
-      clearTimeout(timeout);
+      providerDeadline.dispose();
+      providerElapsedMs = Math.round(performance.now() - providerPipelineStartedAt);
+      providerMs = providerElapsedMs;
       if (error instanceof DOMException && error.name === "AbortError") {
         const diagnostic = timeoutDiagnostic(Math.round(performance.now() - providerPipelineStartedAt));
         console.error("Gemini provider failure:", JSON.stringify(diagnostic));
-        await persistControlledFailure(serviceClient, authenticationId, callerUserId, "PROVIDER_TIMEOUT", "The observation provider timed out before returning a complete response.");
-        return jsonResponse({ error: "PROVIDER_TIMEOUT", message: "Analysis timed out." }, 504);
+        const code = overallDeadlineExpired ? "OVERALL_ANALYSIS_TIMEOUT" : "PROVIDER_TIMEOUT";
+        await persistControlledFailure(
+          serviceClient,
+          authenticationId,
+          callerUserId,
+          code,
+          code === "OVERALL_ANALYSIS_TIMEOUT"
+            ? "The assessment exceeded its controlled application deadline."
+            : "The observation provider timed out before returning a complete response.",
+          pendingProviderAudit(providerAttempts, providerElapsedMs),
+          failureTiming("provider_execution"),
+        );
+        clearTimeout(overallTimer);
+        return jsonResponse({ error: code, message: "Analysis timed out." }, 504);
       }
-      if (error instanceof GeminiEvidenceFetchError) {
-        await persistControlledFailure(serviceClient, authenticationId, callerUserId, error.code, error.message);
-        return jsonResponse({ error: error.code, message: "Evidence could not be prepared for analysis." }, 422);
-      }
-      await persistControlledFailure(serviceClient, authenticationId, callerUserId, "PROVIDER_ERROR", "The observation provider request failed safely.");
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        "PROVIDER_ERROR",
+        "The observation provider request failed safely.",
+        pendingProviderAudit(providerAttempts, providerElapsedMs),
+        failureTiming("provider_execution"),
+      );
+      clearTimeout(overallTimer);
       return jsonResponse({ error: "PROVIDER_ERROR", message: "Analysis provider unavailable." }, 502);
     } finally {
-      clearTimeout(timeout);
+      providerDeadline.dispose();
     }
 
     if (!response.ok) {
@@ -363,8 +534,24 @@ Deno.serve(async (req) => {
         code,
         "The observation provider did not return a usable response.",
         providerAudit || undefined,
+        failureTiming("provider_response"),
       );
+      clearTimeout(overallTimer);
       return jsonResponse({ error: code, message: "Analysis provider unavailable." }, response.status === 429 ? 429 : 502);
+    }
+
+    if (overallDeadlineExpired) {
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        "OVERALL_ANALYSIS_TIMEOUT",
+        "The assessment exceeded its controlled application deadline.",
+        providerAudit || undefined,
+        failureTiming("response_processing"),
+      );
+      clearTimeout(overallTimer);
+      return jsonResponse({ error: "OVERALL_ANALYSIS_TIMEOUT", message: "Analysis timed out." }, 504);
     }
 
     let providerResult: unknown;
@@ -378,7 +565,9 @@ Deno.serve(async (req) => {
         "MALFORMED_PROVIDER_RESPONSE",
         "The observation provider returned an unreadable response.",
         providerAudit || undefined,
+        failureTiming("provider_response"),
       );
+      clearTimeout(overallTimer);
       return jsonResponse({ error: "MALFORMED_PROVIDER_RESPONSE", message: "Analysis provider unavailable." }, 502);
     }
     const structuredResult = extractGeminiStructuredText(providerResult);
@@ -391,7 +580,9 @@ Deno.serve(async (req) => {
         code,
         "The model did not return the required structured observation set.",
         providerAudit || undefined,
+        failureTiming("transport_normalization"),
       );
+      clearTimeout(overallTimer);
       return jsonResponse({ error: code, message: "No assessment verdict was generated." }, 422);
     }
 
@@ -406,7 +597,9 @@ Deno.serve(async (req) => {
         "MALFORMED_MODEL_OUTPUT",
         "The model returned malformed structured data.",
         providerAudit || undefined,
+        failureTiming("transport_normalization"),
       );
+      clearTimeout(overallTimer);
       return jsonResponse({ error: "MALFORMED_MODEL_OUTPUT", message: "No assessment verdict was generated." }, 422);
     }
 
@@ -428,11 +621,26 @@ Deno.serve(async (req) => {
         code,
         "The model response failed strict observation validation.",
         providerAudit || undefined,
+        failureTiming("observation_validation"),
       );
+      clearTimeout(overallTimer);
       return jsonResponse({ error: code, message: "No assessment verdict was generated." }, 422);
     }
 
     const assessment = decideAssessment(observationOutput);
+    if (overallDeadlineExpired) {
+      await persistControlledFailure(
+        serviceClient,
+        authenticationId,
+        callerUserId,
+        "OVERALL_ANALYSIS_TIMEOUT",
+        "The assessment exceeded its controlled application deadline.",
+        providerAudit || undefined,
+        failureTiming("decision_engine"),
+      );
+      clearTimeout(overallTimer);
+      return jsonResponse({ error: "OVERALL_ANALYSIS_TIMEOUT", message: "Analysis timed out." }, 504);
+    }
     const analyzedAt = new Date().toISOString();
     const snapshot = {
           phase1b: true,
@@ -458,6 +666,12 @@ Deno.serve(async (req) => {
               totalProviderLatencyMs: providerElapsedMs,
               attempts: [],
             },
+            timing: timing(analysisStartedAt, {
+              evidenceFetchMs,
+              evidencePreparationMs,
+              providerMs,
+              phaseOnFailure: null,
+            }),
             analyzedAt,
             legacyUnverifiedReferencesUsed,
             analysisSource: canonicalEvidence.source,
@@ -489,6 +703,7 @@ Deno.serve(async (req) => {
       },
     );
     if (completionError?.code === "40001") {
+      clearTimeout(overallTimer);
       return jsonResponse({
         error: "STALE_COMPLETION",
         message: "A newer assessment run completed first. No duplicate run was created.",
@@ -496,6 +711,7 @@ Deno.serve(async (req) => {
     }
     if (completionError || !run) throw completionError || new Error("Atomic assessment completion failed");
 
+    clearTimeout(overallTimer);
     return jsonResponse({
       success: true,
       assessmentRunId: run.id,

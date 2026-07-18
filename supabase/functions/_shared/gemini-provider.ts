@@ -1,6 +1,8 @@
 export const ANALYSIS_MODEL = "gemini-3.5-flash";
 export const FALLBACK_ANALYSIS_MODEL = "gemini-2.5-flash";
-export const GEMINI_TOTAL_TIMEOUT_MS = 30_000;
+export const EVIDENCE_PREPARATION_TIMEOUT_MS = 20_000;
+export const GEMINI_TOTAL_TIMEOUT_MS = 60_000;
+export const OVERALL_ANALYSIS_TIMEOUT_MS = 90_000;
 
 export function geminiGenerateContentEndpoint(model: string): string {
   return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
@@ -29,8 +31,15 @@ export interface GeminiAnalysisRequest {
   prompt: string;
   imageUrls: string[];
   responseJsonSchema: Record<string, unknown>;
+  preparedEvidence?: GeminiPreparedEvidence;
   providerMode?: GeminiProviderMode;
   model?: string;
+}
+
+export interface GeminiPreparedEvidence {
+  imageParts: Array<Record<string, unknown>>;
+  evidenceFetchMs: number;
+  evidencePreparationMs: number;
 }
 
 export interface GeminiDispatchResult {
@@ -65,6 +74,8 @@ export interface GeminiResilienceOptions {
   totalTimeoutMs?: number;
   random?: () => number;
   sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+  now?: () => number;
+  onAttemptStart?: (attempt: Pick<GeminiProviderAttempt, "model" | "providerMode">) => void;
 }
 
 export class GeminiEvidenceFetchError extends Error {
@@ -73,6 +84,19 @@ export class GeminiEvidenceFetchError extends Error {
   constructor(message = "An evidence image could not be prepared for analysis.") {
     super(message);
     this.name = "GeminiEvidenceFetchError";
+  }
+}
+
+export class GeminiEvidenceTimeoutError extends Error {
+  constructor(
+    public readonly code: "EVIDENCE_FETCH_TIMEOUT" | "EVIDENCE_PREPARATION_TIMEOUT",
+    public readonly evidenceFetchMs: number,
+    public readonly evidencePreparationMs: number,
+  ) {
+    super(code === "EVIDENCE_FETCH_TIMEOUT"
+      ? "A canonical image could not be retrieved before the evidence deadline."
+      : "Canonical images could not be prepared before the evidence deadline.");
+    this.name = "GeminiEvidenceTimeoutError";
   }
 }
 
@@ -104,13 +128,18 @@ async function loadImagePart(
   url: string,
   currentTotal: number,
   signal?: AbortSignal,
-): Promise<{ part: Record<string, unknown>; byteLength: number }> {
+  onPreparationStart?: () => void,
+): Promise<{ part: Record<string, unknown>; byteLength: number; fetchMs: number; preparationMs: number }> {
+  const fetchStartedAt = performance.now();
   const response = await fetcher(url, { signal });
+  const fetchMs = Math.round(performance.now() - fetchStartedAt);
   if (!response.ok) throw new GeminiEvidenceFetchError();
 
   const mimeType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() || "";
   if (!SUPPORTED_IMAGE_TYPES.has(mimeType)) throw new GeminiEvidenceFetchError("An evidence image has an unsupported media type.");
 
+  onPreparationStart?.();
+  const preparationStartedAt = performance.now();
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (!bytes.length || bytes.length > MAX_IMAGE_BYTES || currentTotal + bytes.length > MAX_TOTAL_IMAGE_BYTES) {
     throw new GeminiEvidenceFetchError("The submitted evidence exceeds the provider input limit.");
@@ -119,7 +148,55 @@ async function loadImagePart(
   return {
     part: { inlineData: { mimeType, data: base64Encode(bytes) } },
     byteLength: bytes.length,
+    fetchMs,
+    preparationMs: Math.round(performance.now() - preparationStartedAt),
   };
+}
+
+/**
+ * Canonical image retrieval and encoding happen once, before any Gemini model
+ * request. This prevents a transient provider retry from re-fetching evidence.
+ */
+export async function prepareGeminiEvidence(
+  fetcher: FetchLike,
+  imageUrls: string[],
+  signal?: AbortSignal,
+): Promise<GeminiPreparedEvidence> {
+  const imageParts: Array<Record<string, unknown>> = [];
+  let totalImageBytes = 0;
+  let evidenceFetchMs = 0;
+  let evidencePreparationMs = 0;
+  let phase: "fetch" | "preparation" = "fetch";
+  let phaseStartedAt = performance.now();
+
+  try {
+    for (const url of imageUrls) {
+      phase = "fetch";
+      phaseStartedAt = performance.now();
+      const loaded = await loadImagePart(fetcher, url, totalImageBytes, signal, () => {
+        phase = "preparation";
+        phaseStartedAt = performance.now();
+      });
+      totalImageBytes += loaded.byteLength;
+      evidenceFetchMs += loaded.fetchMs;
+      evidencePreparationMs += loaded.preparationMs;
+      imageParts.push(loaded.part);
+    }
+  } catch (error) {
+    if (signal?.aborted && error instanceof DOMException && error.name === "AbortError") {
+      const inFlightMs = Math.round(performance.now() - phaseStartedAt);
+      if (phase === "fetch") evidenceFetchMs += inFlightMs;
+      else evidencePreparationMs += inFlightMs;
+      throw new GeminiEvidenceTimeoutError(
+        phase === "fetch" ? "EVIDENCE_FETCH_TIMEOUT" : "EVIDENCE_PREPARATION_TIMEOUT",
+        evidenceFetchMs,
+        evidencePreparationMs,
+      );
+    }
+    throw error;
+  }
+
+  return { imageParts, evidenceFetchMs, evidencePreparationMs };
 }
 
 export async function loadGeminiImagePart(
@@ -138,12 +215,15 @@ export async function dispatchGeminiAnalysis(
   signal?: AbortSignal,
 ): Promise<GeminiDispatchResult> {
   const parts: Array<Record<string, unknown>> = [{ text: request.prompt }];
-  let totalImageBytes = 0;
-
-  for (const url of request.imageUrls) {
-    const loaded = await loadImagePart(fetcher, url, totalImageBytes, signal);
-    totalImageBytes += loaded.byteLength;
-    parts.push(loaded.part);
+  if (request.preparedEvidence) {
+    parts.push(...request.preparedEvidence.imageParts);
+  } else {
+    let totalImageBytes = 0;
+    for (const url of request.imageUrls) {
+      const loaded = await loadImagePart(fetcher, url, totalImageBytes, signal);
+      totalImageBytes += loaded.byteLength;
+      parts.push(loaded.part);
+    }
   }
 
   const startedAt = performance.now();
@@ -269,10 +349,12 @@ export async function dispatchGeminiAnalysisWithResilience(
   const totalTimeoutMs = options.totalTimeoutMs || GEMINI_TOTAL_TIMEOUT_MS;
   const random = options.random || Math.random;
   const sleep = options.sleep || defaultSleep;
-  const startedAt = performance.now();
+  const now = options.now || performance.now.bind(performance);
+  const startedAt = now();
   const attempts: GeminiProviderAttempt[] = [];
 
   const dispatchAttempt = async (model: string): Promise<GeminiCompatibilityDispatchResult> => {
+    options.onAttemptStart?.({ model, providerMode: "structured_schema" });
     const dispatched = await dispatchGeminiAnalysisWithFallback(
       fetcher,
       apiKey,
@@ -299,7 +381,7 @@ export async function dispatchGeminiAnalysisWithResilience(
     model,
     attemptCount: attempts.length,
     fallbackUsed,
-    totalElapsedMs: Math.round(performance.now() - startedAt),
+    totalElapsedMs: Math.round(now() - startedAt),
     attempts,
   });
 
@@ -313,18 +395,18 @@ export async function dispatchGeminiAnalysisWithResilience(
     if (attempt === 2) break;
     const baseDelayMs = 1_000 * (2 ** attempt);
     const delayMs = baseDelayMs + Math.floor(random() * 251);
-    if (performance.now() - startedAt + delayMs >= totalTimeoutMs) {
+    if (now() - startedAt + delayMs >= totalTimeoutMs) {
       return complete(latestPrimary, primaryModel, false);
     }
     await sleep(delayMs, signal);
-    if (performance.now() - startedAt >= totalTimeoutMs) {
+    if (now() - startedAt >= totalTimeoutMs) {
       return complete(latestPrimary, primaryModel, false);
     }
   }
 
   // The fallback is intentionally unavailable for every other provider or
   // validation condition, including quota exhaustion and malformed output.
-  if (!latestPrimary || performance.now() - startedAt >= totalTimeoutMs) {
+  if (!latestPrimary || now() - startedAt >= totalTimeoutMs) {
     if (!latestPrimary) throw new Error("Gemini dispatch did not produce a response.");
     return complete(latestPrimary, primaryModel, false);
   }

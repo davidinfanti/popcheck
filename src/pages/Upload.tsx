@@ -4,8 +4,9 @@ import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/components/ui/sonner";
-import { motion, AnimatePresence } from "framer-motion";
-import { ArrowLeft, ScanLine, Loader2, Rocket, AlertTriangle, Check } from "lucide-react";
+import { safeAnalysisFailureMessage } from "@/lib/analysisFailure";
+import { motion } from "framer-motion";
+import { ArrowLeft, ScanLine, Loader2, Rocket, AlertTriangle } from "lucide-react";
 import UrlImportBar from "@/components/upload/UrlImportBar";
 import DropZone from "@/components/upload/DropZone";
 
@@ -18,15 +19,11 @@ const SLOTS = [
   { key: "macro", label: "Macro", emoji: "🔬", tip: "Close-up of POP! logo and stickers", required: false },
 ] as const;
 
-const FORENSIC_PHASES = [
-  "Checking evidence quality and visible regions...",
-  "Reading visible identity fields without inference...",
-  "Recording packaging and typography observations...",
-  "Recording visible code and figure observations...",
-  "Disclosing unavailable and uncertain evidence...",
-  "Comparing against available references by reliability...",
-  "Validating the structured observation contract...",
-  "Applying the deterministic decision engine...",
+const PROGRESS_PHASES = [
+  "Preparing evidence...",
+  "Analysing visible details...",
+  "Validating observations...",
+  "Finalising assessment...",
 ];
 
 export default function UploadPage() {
@@ -43,8 +40,8 @@ export default function UploadPage() {
       return;
     }
     const id = setInterval(() => {
-      setPhaseIndex((p) => Math.min(p + 1, FORENSIC_PHASES.length - 1));
-    }, 2200);
+      setPhaseIndex((p) => Math.min(p + 1, PROGRESS_PHASES.length - 1));
+    }, 8_000);
     return () => clearInterval(id);
   }, [uploading]);
 
@@ -147,7 +144,7 @@ export default function UploadPage() {
       navigate(`/results/${authRecord.id}`);
     } catch (err: any) {
       console.error(err);
-      toast.error(err.message || "Analysis failed. Please try again.");
+      toast.error(await safeAnalysisFailureMessage(err));
     } finally {
       setUploading(false);
     }
@@ -173,36 +170,15 @@ export default function UploadPage() {
           <div>
             <h2 className="font-display text-xl font-bold text-foreground mb-2">AI-assisted assessment in progress...</h2>
             <p className="text-sm text-muted-foreground">
-              Uploading and running forensic analysis on {completedCount} photos. This takes a few seconds.
+              Uploading and assessing {completedCount} photos. Real multi-image analyses can take up to about one minute.
             </p>
           </div>
 
-          {/* Real-time forensic phase ticker */}
-          <div className="text-left rounded-xl border border-border/60 bg-card/60 p-4 space-y-2">
-            {FORENSIC_PHASES.map((label, i) => {
-              const done = i < phaseIndex;
-              const active = i === phaseIndex;
-              return (
-                <div key={i} className="flex items-start gap-2.5">
-                  <div className="mt-0.5 shrink-0">
-                    {done ? (
-                      <Check className="w-3.5 h-3.5 text-success" />
-                    ) : active ? (
-                      <Loader2 className="w-3.5 h-3.5 text-primary animate-spin" />
-                    ) : (
-                      <div className="w-3.5 h-3.5 rounded-full border border-border" />
-                    )}
-                  </div>
-                  <span
-                    className={`text-[11px] font-mono leading-tight ${
-                      active ? "text-foreground" : done ? "text-muted-foreground line-through" : "text-muted-foreground/50"
-                    }`}
-                  >
-                    {label}
-                  </span>
-                </div>
-              );
-            })}
+          <div className="rounded-xl border border-border/60 bg-card/60 p-4 flex items-center gap-2.5 text-left">
+            <Loader2 className="w-3.5 h-3.5 text-primary animate-spin shrink-0" />
+            <span className="text-[11px] font-mono leading-tight text-foreground">
+              {PROGRESS_PHASES[phaseIndex]}
+            </span>
           </div>
         </motion.div>
       </div>
