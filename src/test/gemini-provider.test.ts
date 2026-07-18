@@ -345,6 +345,42 @@ describe("direct Gemini provider adapter", () => {
     expect(fetcher.mock.calls[3][0]).toContain(`/models/${FALLBACK_ANALYSIS_MODEL}:generateContent`);
   });
 
+  it("keeps 503 retries and the model fallback inside the dedicated provider budget", async () => {
+    let now = 0;
+    const fetcher = vi.fn(async () => {
+      now += 10_000;
+      return fetcher.mock.calls.length <= 3 ? unavailable() : accepted();
+    });
+    const sleep = vi.fn(async (delayMs: number) => { now += delayMs; });
+
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { totalTimeoutMs: GEMINI_TOTAL_TIMEOUT_MS, now: () => now, sleep, random: () => 0 });
+
+    expect(result.fallbackUsed).toBe(true);
+    expect(result.attemptCount).toBe(4);
+    expect(result.totalElapsedMs).toBe(43_000);
+    expect(result.totalElapsedMs).toBeLessThan(GEMINI_TOTAL_TIMEOUT_MS);
+  });
+
+  it("does not begin another 503 retry once the remaining provider budget is exhausted", async () => {
+    let now = 0;
+    const fetcher = vi.fn(async () => {
+      now += 59_000;
+      return unavailable();
+    });
+
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { totalTimeoutMs: GEMINI_TOTAL_TIMEOUT_MS, now: () => now, random: () => 0 });
+
+    expect(result.attemptCount).toBe(1);
+    expect(result.fallbackUsed).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it("returns one final controlled unavailable response after all permitted attempts", async () => {
     const fetcher = vi.fn(async () => unavailable());
     const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
