@@ -106,13 +106,17 @@ describe("Edge Function trust boundaries", () => {
 });
 
 describe("reference provenance regression", () => {
-  it("contains no DuckDuckGo retrieval or internet gold-standard instruction", () => {
+  it("contains no internet or legacy-reference retrieval instruction", () => {
     const source = projectFile("supabase/functions/analyze-funko/index.ts");
 
     expect(source.toLowerCase()).not.toContain("duckduckgo");
     expect(source.toLowerCase()).not.toContain("gold standard");
     expect(source.toLowerCase()).not.toContain("gold-standard");
-    expect(source.toLowerCase()).toContain("legacy, unverified");
+    expect(source).not.toContain('from("negative_references")');
+    expect(source).not.toContain('from("original_references")');
+    expect(source).not.toContain('from("fake_references")');
+    expect(source).not.toContain('from("reference_pops")');
+    expect(source).toContain("Only explicitly supplied verified forensic records may be named");
   });
 });
 

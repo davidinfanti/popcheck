@@ -21,6 +21,7 @@ import { Slider } from "@/components/ui/slider";
 import { format } from "date-fns";
 import { enUS } from "date-fns/locale";
 import { cn } from "@/lib/utils";
+import { ForensicTargetPack } from "@/components/admin/ForensicTargetPack";
 import {
   GUIDANCE_ACTIONS,
   GUIDANCE_NOTE_TEMPLATES,
@@ -118,7 +119,7 @@ interface GuidanceMetadata {
   previousVersionId: string | null;
 }
 
-type Tab = "feed" | "flagged" | "rules" | "references" | "users" | "settings";
+type Tab = "feed" | "flagged" | "rules" | "references" | "forensic" | "users" | "settings";
 
 const PART_TYPES = ["Front", "Back", "Bottom", "Logo_Detail", "Left_Side", "Right_Side", "Sticker", "Macro", "Other"];
 
@@ -430,6 +431,7 @@ export default function Admin() {
     { key: "flagged", label: `🚩 Flagged (${flags.filter(f => f.status === "pending").length})` },
     { key: "rules", label: `📋 Rules (${rules.length})` },
     { key: "references", label: `🖼️ References (${originals.length + fakes.length})` },
+    { key: "forensic", label: "🔬 Saul target pack" },
     { key: "users", label: `👥 Users (${usersList.length})` },
     { key: "settings", label: "⚙️ Settings" },
   ];
@@ -962,6 +964,8 @@ export default function Admin() {
             )}
           </div>
         )}
+
+        {tab === "forensic" && <ForensicTargetPack userId={user.id} />}
 
         {/* USERS */}
         {tab === "users" && (
