@@ -1,13 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ANALYSIS_MODEL,
+  EVIDENCE_PREPARATION_TIMEOUT_MS,
   FALLBACK_ANALYSIS_MODEL,
   GEMINI_GENERATE_CONTENT_ENDPOINT,
+  GEMINI_TOTAL_TIMEOUT_MS,
   GeminiEvidenceFetchError,
+  GeminiEvidenceTimeoutError,
   dispatchGeminiAnalysis,
   dispatchGeminiAnalysisWithFallback,
   dispatchGeminiAnalysisWithResilience,
   extractGeminiStructuredText,
+  prepareGeminiEvidence,
 } from "../../supabase/functions/_shared/gemini-provider";
 import {
   GEMINI_TRANSPORT_NULL,
@@ -152,6 +156,62 @@ describe("direct Gemini provider adapter", () => {
       "server-only-key",
       request,
     )).rejects.toMatchObject({ code: "PROVIDER_EVIDENCE_FETCH" });
+  });
+
+  it("prepares canonical evidence once before Gemini retries and does not retain its source URL", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+        status: 200,
+        headers: { "Content-Type": "image/png" },
+      }))
+      .mockResolvedValueOnce(unavailable())
+      .mockResolvedValueOnce(accepted());
+
+    const preparedEvidence = await prepareGeminiEvidence(fetcher, request.imageUrls);
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+      preparedEvidence,
+    }, undefined, undefined, { sleep: noDelay, random: () => 0 });
+
+    expect(result.attemptCount).toBe(2);
+    expect(fetcher.mock.calls.filter(([input]) => input === request.imageUrls[0])).toHaveLength(1);
+    expect(JSON.stringify({ evidenceFetchMs: preparedEvidence.evidenceFetchMs, evidencePreparationMs: preparedEvidence.evidencePreparationMs }))
+      .not.toContain(request.imageUrls[0]);
+  });
+
+  it("classifies an aborted canonical fetch as an evidence-fetch timeout without dispatching Gemini", async () => {
+    const controller = new AbortController();
+    const fetcher = vi.fn((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }));
+    const preparing = prepareGeminiEvidence(fetcher, request.imageUrls, controller.signal);
+    controller.abort();
+
+    await expect(preparing).rejects.toMatchObject<Partial<GeminiEvidenceTimeoutError>>({
+      code: "EVIDENCE_FETCH_TIMEOUT",
+      evidencePreparationMs: 0,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a simulated 42-second provider response inside the dedicated 60-second budget", async () => {
+    let now = 0;
+    const fetcher = vi.fn(async () => {
+      now += 42_000;
+      return accepted();
+    });
+
+    const result = await dispatchGeminiAnalysisWithResilience(fetcher, "server-only-key", {
+      ...request,
+      imageUrls: [],
+    }, undefined, undefined, { now: () => now, totalTimeoutMs: GEMINI_TOTAL_TIMEOUT_MS });
+
+    expect(EVIDENCE_PREPARATION_TIMEOUT_MS).toBe(20_000);
+    expect(GEMINI_TOTAL_TIMEOUT_MS).toBe(60_000);
+    expect(result.response.ok).toBe(true);
+    expect(result.totalElapsedMs).toBe(42_000);
+    expect(result.attemptCount).toBe(1);
   });
 
   it("falls back once to schema-less JSON only after a 400 INVALID_ARGUMENT compilation failure", async () => {
